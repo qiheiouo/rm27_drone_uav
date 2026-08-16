@@ -11,6 +11,7 @@ endif()
 # MCU 兼容核心 + host 仿真。所有代码 C99、静态内存、无动态分配。
 add_library(nav_core STATIC
     core/planner/waypoint.c
+    core/planner/trajectory.c
     core/state_estimator/state_estimator.c
     core/mission/mission_fsm.c
     core/guidance/guidance.c
@@ -63,7 +64,7 @@ target_link_libraries(mission_sim PRIVATE nav_core)
 
 enable_testing()
 
-foreach(t test_math test_impact_detector test_mission_fsm test_camera test_ins_estimator test_vision_frontend)
+foreach(t test_math test_impact_detector test_mission_fsm test_camera test_ins_estimator test_vision_frontend test_trajectory)
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core)
     add_test(NAME ${t} COMMAND ${t})

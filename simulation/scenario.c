@@ -56,6 +56,7 @@ void scenario_default(Scenario *sc)
     sc->estimator.kp_vo_pos = 2.0f;
     sc->estimator.kp_vo_vel = 3.0f;
     sc->estimator.kp_vo_yaw = 0.0f;
+    sc->estimator.kp_tof = 2.0f;
 
     /* ---- 撞击检测（比力偏离 1g 判定） ---- */
     sc->impact.accel_spike_threshold = 12.0f;  /* m/s^2 偏离 1g；机动 <7，撞击 >100 */

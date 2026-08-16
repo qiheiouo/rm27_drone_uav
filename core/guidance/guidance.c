@@ -37,6 +37,19 @@ void cruise_guidance_update(const Waypoint *wp, const NavState *nav, GuidanceOut
     }
 }
 
+void trajectory_guidance_update(const Trajectory *traj, float t,
+                                const NavState *nav, GuidanceOutput *out)
+{
+    Vec3f accel_ff;
+    traj_evaluate(traj, t, &out->pos_sp, &out->vel_sp, &accel_ff);
+    out->use_pos_sp = 1u;
+    if (vec3_norm_xy(out->vel_sp) > 0.2f) {
+        out->yaw_sp = atan2f(out->vel_sp.y, out->vel_sp.x);
+    } else {
+        out->yaw_sp = nav->yaw;
+    }
+}
+
 void target_guidance_update(const TargetTrack *target, const NavState *nav,
                             const TerminalParams *params, GuidanceOutput *out)
 {

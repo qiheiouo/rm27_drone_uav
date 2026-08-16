@@ -70,10 +70,16 @@ typedef struct {
     /* Mahony 姿态修正 */
     float  kp_tilt;              /* 加速度计倾斜校正增益 */
     float  ki_gyro_bias;         /* 陀螺偏置学习增益 */
-    /* VO 互补校正增益 (1/s) */
+    /* VO 互补校正增益 (1/s)。
+     * kp_vo_yaw = 0：光流 VO 的偏航与 INS 偏航同源（同一陀螺积分），
+     * 校正只会把撞击/冻结期间 vf 偏航的瞬时错误灌回估计器（正反馈）。
+     * 偏航漂移由重定位时的 vf_set_pose 对齐来兜底。 */
     float  kp_vo_pos;
     float  kp_vo_vel;
     float  kp_vo_yaw;
+    /* ToF 测距高度融合增益 (1/s)：光流 Vz 通道可观性弱，
+     * 高度由 rangefinder 直接锚定（地面 z=0 假设） */
+    float  kp_tof;
 } EstimatorConfig;
 
 typedef struct {
@@ -96,9 +102,10 @@ void estimator_init(StateEstimator *est, const EstimatorConfig *cfg);
 void estimator_notify_impact(StateEstimator *est);
 /* 外部绝对参考注入（基座 marker 重建 → 第三层定位） */
 void estimator_notify_relocalized(StateEstimator *est, const NavState *absolute_ref);
-/* 每 tick：imu 始终有效；vo->valid 表示视觉是否可用 */
+/* 每 tick：imu 始终有效；vo->valid 表示视觉是否可用；
+ * tof_height 为 ToF 离地高度（m），<0 表示本帧无效 */
 void estimator_update(StateEstimator *est, const ImuSample *imu,
-                      const OdomSample *vo, float dt);
+                      const OdomSample *vo, float tof_height, float dt);
 
 const char *est_status_name(EstStatus s);
 

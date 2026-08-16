@@ -15,6 +15,7 @@
 #include "target_tracker.h"
 #include "home_detector.h"
 #include "waypoint.h"
+#include "trajectory.h"
 #include "pos_controller.h"   /* GuidanceOutput 定义 */
 
 #ifdef __cplusplus
@@ -46,6 +47,10 @@ void guidance_hold(const Vec3f *hold_pos, const NavState *nav, GuidanceOutput *o
 
 /* 巡航/搜索/返航：朝航点飞行，yaw 朝运动方向 */
 void cruise_guidance_update(const Waypoint *wp, const NavState *nav, GuidanceOutput *out);
+
+/* 多项式轨迹跟踪：位置+速度前馈，yaw 朝轨迹速度方向 */
+void trajectory_guidance_update(const Trajectory *traj, float t,
+                                const NavState *nav, GuidanceOutput *out);
 
 /* 末端制导：目标相对视觉伺服（第二层定位，脱离全局坐标） */
 void target_guidance_update(const TargetTrack *target, const NavState *nav,

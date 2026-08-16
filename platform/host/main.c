@@ -27,6 +27,7 @@
 #include "vision_frontend.h"
 #include "mission_fsm.h"
 #include "guidance.h"
+#include "trajectory.h"
 #include "agent_state.h"
 #include "collision_interface.h"
 
@@ -89,6 +90,12 @@ int main(int argc, char **argv)
 
     CtrlOutput ctrl = { {0.0f, 0.0f, 0.0f}, 0.0f };
 
+    Trajectory traj;
+    float    traj_t = 0.0f;
+    uint8_t  traj_active = 0u;
+    traj.count = 0u;
+    traj.duration = 0.0f;
+
     float   last_impact_t = -100.0f;
     float   last_relocalize_t = -100.0f;
     float   t = 0.0f;
@@ -117,13 +124,14 @@ int main(int argc, char **argv)
         sim_sensors_home(&sensors, &sim, &sc.cam_down, sc.home_pos,
                          sc.marker_size_m, vision_freeze, t_ms, &hpix);
 
-        /* VO：光流前端（默认）或合成 VO（对照） */
+        /* VO：光流前端（默认）或合成 VO（对照）；
+         * ToF 高度同时供光流尺度与估计器 z 通道融合 */
+        float tof = sim_sensors_tof(&sensors, &sim);
         if (sc.use_flow_vo) {
             FlowFrame frame;
             sim_vision_frame(&sensors, &vision_world, &sim, &sc.cam_down,
                              vision_freeze, t_ms, &frame);
             /* ToF 提供独立高度尺度；姿态用上一 tick（帧处理延迟） */
-            float tof = sim_sensors_tof(&sensors, &sim);
             vf_update(&vf, &frame, imu.gyro, estimator.out.att,
                       tof, sc.dt, &vo);
         } else {
@@ -131,7 +139,7 @@ int main(int argc, char **argv)
         }
 
         /* ---- 估计 / 撞击检测 ---- */
-        estimator_update(&estimator, &imu, &vo, sc.dt);
+        estimator_update(&estimator, &imu, &vo, tof, sc.dt);
 
         if (impact_detector_update(&impact_det, &imu)) {
             estimator_notify_impact(&estimator);
@@ -212,7 +220,28 @@ int main(int argc, char **argv)
             guidance_hold(&mout.hold_pos, &estimator.out, &gout);
             break;
         case GM_WAYPOINT:
-            cruise_guidance_update(&mout.current_waypoint, &estimator.out, &gout);
+            /* MINCO-lite：进入/走完航线时构建 min-jerk 多项式轨迹并跟踪 */
+            if (!traj_active || mout.state_changed || traj_done(&traj, traj_t)) {
+                if (mout.state == MS_OUTBOUND || mout.state == MS_SEARCH) {
+                    const WaypointQueue *route =
+                        (mout.state == MS_OUTBOUND) ? &fsm.outbound : &fsm.search;
+                    traj_build(&traj, estimator.out.pos, estimator.out.vel, route, 1.4f);
+                } else {
+                    traj_build_single(&traj, estimator.out.pos, estimator.out.vel,
+                                      mout.current_waypoint.pos,
+                                      mout.current_waypoint.speed > 0.1f ?
+                                          mout.current_waypoint.speed : sc.mission.cruise_speed_mps,
+                                      1.4f);
+                }
+                traj_t = 0.0f;
+                traj_active = 1u;
+            }
+            if (traj.count > 0u) {
+                trajectory_guidance_update(&traj, traj_t, &estimator.out, &gout);
+                traj_t += sc.dt;
+            } else {
+                cruise_guidance_update(&mout.current_waypoint, &estimator.out, &gout);
+            }
             break;
         case GM_TERMINAL:
             target_guidance_update(&tracker.out, &estimator.out, &sc.terminal, &gout);

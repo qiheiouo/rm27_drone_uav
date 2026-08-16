@@ -58,7 +58,7 @@ int main(void)
         for (int i = 0; i < 500; i++) {   /* 5 s */
             ImuSample imu = make_imu(vec3(0.0f, 0.0f, NAV_GRAVITY), vec3_zero(), t);
             OdomSample vo = make_vo(vec3_zero(), vec3_zero(), 0.0f, 1u, t);
-            estimator_update(&est, &imu, &vo, dt);
+            estimator_update(&est, &imu, &vo, -1.0f, dt);
             t += 10u;
         }
         CHECK(vec3_norm(est.out.pos) < 0.05f);
@@ -79,7 +79,7 @@ int main(void)
         for (int i = 0; i < 500; i++) {
             ImuSample imu = make_imu(f_body, vec3_zero(), t);
             OdomSample vo = make_vo(vec3_zero(), vec3_zero(), 0.0f, 1u, t);
-            estimator_update(&est, &imu, &vo, dt);
+            estimator_update(&est, &imu, &vo, -1.0f, dt);
             t += 10u;
         }
         /* 估计姿态作用于实测比力应恢复 (0,0,g) */
@@ -99,7 +99,7 @@ int main(void)
         for (int i = 0; i < 300; i++) {   /* 3 s */
             ImuSample imu = make_imu(vec3(0.0f, 0.0f, NAV_GRAVITY), vec3_zero(), t);
             OdomSample vo = make_vo(vec3_zero(), vec3_zero(), 0.0f, 1u, t);
-            estimator_update(&est, &imu, &vo, dt);
+            estimator_update(&est, &imu, &vo, -1.0f, dt);
             t += 10u;
         }
         CHECK(fabsf(est.out.pos.x) < 0.1f);
@@ -118,7 +118,7 @@ int main(void)
         /* 0.7 s VO 无效 → DEGRADED */
         for (int i = 0; i < 70; i++) {
             imu.timestamp_ms = t; vo_bad.timestamp_ms = t;
-            estimator_update(&est, &imu, &vo_bad, dt);
+            estimator_update(&est, &imu, &vo_bad, -1.0f, dt);
             t += 10u;
         }
         CHECK(est.out.status == EST_DEGRADED);
@@ -126,7 +126,7 @@ int main(void)
         /* 再继续 1.5 s（累计 2.2 s）→ LOST，输出冻结 */
         for (int i = 0; i < 150; i++) {
             imu.timestamp_ms = t; vo_bad.timestamp_ms = t;
-            estimator_update(&est, &imu, &vo_bad, dt);
+            estimator_update(&est, &imu, &vo_bad, -1.0f, dt);
             t += 10u;
         }
         CHECK(est.out.status == EST_LOST);
@@ -136,7 +136,7 @@ int main(void)
         int saw_recovering = 0, saw_relocalized = 0;
         for (int i = 0; i < 100; i++) {
             imu.timestamp_ms = t; vo_ok.timestamp_ms = t;
-            estimator_update(&est, &imu, &vo_ok, dt);
+            estimator_update(&est, &imu, &vo_ok, -1.0f, dt);
             t += 10u;
             if (est.out.status == EST_RECOVERING) saw_recovering = 1;
             if (est.out.status == EST_RELOCALIZED) saw_relocalized = 1;
@@ -155,7 +155,7 @@ int main(void)
         ImuSample imu = make_imu(vec3(0.0f, 0.0f, NAV_GRAVITY), vec3_zero(), t);
         OdomSample vo = make_vo(vec3_zero(), vec3_zero(), 0.0f, 1u, t);
 
-        estimator_update(&est, &imu, &vo, dt);
+        estimator_update(&est, &imu, &vo, -1.0f, dt);
         t += 10u;
         estimator_notify_impact(&est);
         CHECK(est.out.status == EST_DEGRADED);
@@ -163,18 +163,36 @@ int main(void)
         /* 盲期内持续喂有效 VO：不应进入 RECOVERING/TRACKING */
         for (int i = 0; i < 30; i++) {   /* 0.3 s < 0.4 s 盲期 */
             imu.timestamp_ms = t; vo.timestamp_ms = t;
-            estimator_update(&est, &imu, &vo, dt);
+            estimator_update(&est, &imu, &vo, -1.0f, dt);
             t += 10u;
             CHECK(est.out.status == EST_DEGRADED);
         }
         /* 盲期结束后 VO 被采纳 → RECOVERING → ... → TRACKING */
         for (int i = 0; i < 200; i++) {
             imu.timestamp_ms = t; vo.timestamp_ms = t;
-            estimator_update(&est, &imu, &vo, dt);
+            estimator_update(&est, &imu, &vo, -1.0f, dt);
             t += 10u;
         }
         CHECK(est.out.status == EST_TRACKING);
         printf("test_ins_estimator: impact blind PASS\n");
+    }
+
+    /* ---- 6. ToF 高度融合：z 初始误差 1 m 应收敛 ---- */
+    {
+        StateEstimator est;
+        EstimatorConfig cfg = test_cfg();
+        cfg.kp_tof = 2.0f;
+        estimator_init(&est, &cfg);
+        est.ins_pos = vec3(0.0f, 0.0f, 1.0f);   /* 注入 z 误差（真值高度 0） */
+        uint32_t t = 0u;
+        for (int i = 0; i < 300; i++) {   /* 3 s */
+            ImuSample imu = make_imu(vec3(0.0f, 0.0f, NAV_GRAVITY), vec3_zero(), t);
+            OdomSample vo = make_vo(vec3_zero(), vec3_zero(), 0.0f, 1u, t);
+            estimator_update(&est, &imu, &vo, 0.0f, dt);   /* tof 报高度 0 */
+            t += 10u;
+        }
+        CHECK(fabsf(est.out.pos.z) < 0.15f);
+        printf("test_ins_estimator: tof height fusion PASS\n");
     }
 
     if (failures == 0) {

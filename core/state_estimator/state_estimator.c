@@ -75,21 +75,18 @@ static void ins_predict(StateEstimator *est, const ImuSample *imu, float dt)
     est->ins_vel = vec3_add(est->ins_vel, vec3_scale(a_nav, dt));
 }
 
-/* VO 互补校正 */
+/* VO 互补校正（仅水平通道：光流 Vz 可观性弱，z 由 ToF 锚定） */
 static void ins_correct_vo(StateEstimator *est, const OdomSample *vo, float dt)
 {
     float kp_pos = est->cfg.kp_vo_pos * dt;
     float kp_vel = est->cfg.kp_vo_vel * dt;
-    float kp_yaw = est->cfg.kp_vo_yaw * dt;
 
-    est->ins_pos = vec3_add(est->ins_pos,
-                            vec3_scale(vec3_sub(vo->pos, est->ins_pos), kp_pos));
-    est->ins_vel = vec3_add(est->ins_vel,
-                            vec3_scale(vec3_sub(vo->vel, est->ins_vel), kp_vel));
-
-    float yaw_err = wrap_pi(vo->yaw - quat_to_yaw(est->ins_att));
-    Quatf dq = quat_from_axis_angle(vec3(0.0f, 0.0f, 1.0f), kp_yaw * yaw_err);
-    est->ins_att = quat_normalize(quat_mul(dq, est->ins_att));
+    est->ins_pos.x += kp_pos * (vo->pos.x - est->ins_pos.x);
+    est->ins_pos.y += kp_pos * (vo->pos.y - est->ins_pos.y);
+    est->ins_vel.x += kp_vel * (vo->vel.x - est->ins_vel.x);
+    est->ins_vel.y += kp_vel * (vo->vel.y - est->ins_vel.y);
+    /* vo->yaw 不校正（与 INS 偏航同源，见 scenario 配置说明） */
+    (void)vo;
 }
 
 static void publish_ins(StateEstimator *est, const ImuSample *imu)
@@ -172,7 +169,7 @@ static void health_update(StateEstimator *est, uint8_t vo_valid, float dt)
 }
 
 void estimator_update(StateEstimator *est, const ImuSample *imu,
-                      const OdomSample *vo, float dt)
+                      const OdomSample *vo, float tof_height, float dt)
 {
     uint8_t vo_valid = (vo->valid && est->blind_time <= 0.0f) ? 1u : 0u;
 
@@ -181,6 +178,16 @@ void estimator_update(StateEstimator *est, const ImuSample *imu,
         ins_predict(est, imu, dt);
         if (vo_valid && est->out.status != EST_LOST) {
             ins_correct_vo(est, vo, dt);
+        }
+        /* ToF 高度融合：把斜距按姿态投影回垂直高度，锚定 z 通道 */
+        if (tof_height >= 0.0f && est->out.status != EST_LOST) {
+            float cos_tilt = quat_rotate(est->ins_att, vec3(0.0f, 0.0f, 1.0f)).z;
+            if (cos_tilt > 0.5f) {
+                float h_meas = tof_height * cos_tilt;
+                float err_z = h_meas - est->ins_pos.z;
+                est->ins_pos.z += est->cfg.kp_tof * err_z * dt;
+                est->ins_vel.z += est->cfg.kp_tof * err_z * dt;  /* 同增益阻尼 vel z */
+            }
         }
         publish_ins(est, imu);
     } else {
