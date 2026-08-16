@@ -186,7 +186,7 @@ void estimator_update(StateEstimator *est, const ImuSample *imu,
                 float h_meas = tof_height * cos_tilt;
                 float err_z = h_meas - est->ins_pos.z;
                 est->ins_pos.z += est->cfg.kp_tof * err_z * dt;
-                est->ins_vel.z += est->cfg.kp_tof * err_z * dt;  /* 同增益阻尼 vel z */
+                est->ins_vel.z += est->cfg.kp_tof_vel * err_z * dt;
             }
         }
         publish_ins(est, imu);

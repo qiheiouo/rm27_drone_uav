@@ -66,6 +66,7 @@ typedef struct {
     float terminal_range_m;         /* TARGET_TRACK → TERMINAL 的距离门限 */
     float target_lost_timeout_s;    /* 目标丢失超时 → 回 SEARCH */
     float recovery_hold_s;          /* RECOVERY 最短稳定时间 */
+    float recovery_tilt_ok_rad;     /* RECOVERY 退出允许的最大倾角 */
     float breakaway_height_m;       /* BREAKAWAY 爬升高度 */
     float home_region_tol_m;        /* 距 home 多少米内认为进入基座区域 */
     float home_search_alt_m;        /* HOME_SEARCH 的搜索高度 */

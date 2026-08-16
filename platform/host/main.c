@@ -43,6 +43,14 @@ int main(int argc, char **argv)
             sc.estimator.mode = EST_MODE_TRUTH;
         } else if (strcmp(argv[i], "--sim-vo") == 0) {
             sc.use_flow_vo = 0u;   /* 对照：合成 VO（注入漂移模型） */
+        } else if (strcmp(argv[i], "--hard-impact") == 0) {
+            /* 剧烈撞击：大翻倾（>90° 量级），视觉冻结更久 */
+            sc.impact_delta_v = vec3(-2.5f, 1.6f, 1.2f);
+            sc.impact_delta_yaw = 1.5f;
+            sc.impact_delta_pitch = 1.2f;
+            sc.impact_delta_roll = 1.4f;
+            sc.vision_freeze_s = 0.8f;
+            sc.estimator.impact_blind_s = 0.8f;
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             sc.seed = (uint32_t)strtoul(argv[++i], 0, 10);
         } else {
@@ -280,10 +288,10 @@ int main(int argc, char **argv)
             t - last_impact_t >= 0.5f &&
             vec3_dist(sim.pos, sc.target_pos) <= sc.impact_range_m) {
             impact.active = 1u;
-            impact.delta_v = vec3(-1.8f, 1.2f, 0.9f);   /* 弹开 + 上抛 */
-            impact.delta_yaw = 0.9f;
-            impact.delta_pitch = 0.5f;
-            impact.delta_roll = 0.4f;
+            impact.delta_v = sc.impact_delta_v;
+            impact.delta_yaw = sc.impact_delta_yaw;
+            impact.delta_pitch = sc.impact_delta_pitch;
+            impact.delta_roll = sc.impact_delta_roll;
             last_impact_t = t;
             printf("[t=%6.2f] EVENT physical contact with target\n", t);
         }

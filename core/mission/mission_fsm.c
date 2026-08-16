@@ -143,12 +143,18 @@ void mission_fsm_update(MissionFsm *fsm, const MissionInput *in, MissionOutput *
         break;
 
     case MS_RECOVERY:
-        /* 姿态稳定由低层飞控保证；此处做速度阻尼并等待估计器健康 */
-        if (fsm->state_time >= c->recovery_hold_s && estimator_ok(&in->nav)) {
-            fsm->breakaway_target = vec3_add(in->nav.pos, vec3(0.0f, 0.0f, c->breakaway_height_m));
-            enter_state(fsm, MS_BREAKAWAY, out);
-        } else if (fsm->state_time >= c->recovery_hold_s + c->estimator_lost_timeout_s) {
-            enter_state(fsm, MS_EMERGENCY_LAND, out);
+        /* 姿态稳定由低层飞控保证；此处做速度阻尼，
+         * 退出条件：稳定时间到 + 估计器健康 + 倾角已改平 */
+        {
+            float tilt = acosf(clampf(
+                quat_rotate(in->nav.att, vec3(0.0f, 0.0f, 1.0f)).z, -1.0f, 1.0f));
+            if (fsm->state_time >= c->recovery_hold_s &&
+                estimator_ok(&in->nav) && tilt <= c->recovery_tilt_ok_rad) {
+                fsm->breakaway_target = vec3_add(in->nav.pos, vec3(0.0f, 0.0f, c->breakaway_height_m));
+                enter_state(fsm, MS_BREAKAWAY, out);
+            } else if (fsm->state_time >= c->recovery_hold_s + c->estimator_lost_timeout_s) {
+                enter_state(fsm, MS_EMERGENCY_LAND, out);
+            }
         }
         break;
 

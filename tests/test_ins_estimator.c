@@ -29,7 +29,9 @@ static EstimatorConfig test_cfg(void)
     cfg.ki_gyro_bias = 0.05f;
     cfg.kp_vo_pos = 2.0f;
     cfg.kp_vo_vel = 3.0f;
-    cfg.kp_vo_yaw = 1.0f;
+    cfg.kp_vo_yaw = 0.0f;
+    cfg.kp_tof = 2.0f;
+    cfg.kp_tof_vel = 8.0f;
     return cfg;
 }
 

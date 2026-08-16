@@ -78,8 +78,11 @@ typedef struct {
     float  kp_vo_vel;
     float  kp_vo_yaw;
     /* ToF 测距高度融合增益 (1/s)：光流 Vz 通道可观性弱，
-     * 高度由 rangefinder 直接锚定（地面 z=0 假设） */
+     * 高度由 rangefinder 直接锚定（地面 z=0 假设）。
+     * kp_tof 为位置通道，kp_tof_vel 为速度通道（二阶互补滤波，
+     * 速度增益需显著大于位置增益以抑制加速度计 z 偏置积分） */
     float  kp_tof;
+    float  kp_tof_vel;
 } EstimatorConfig;
 
 typedef struct {

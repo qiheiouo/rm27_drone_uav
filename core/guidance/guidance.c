@@ -80,11 +80,22 @@ void target_guidance_update(const TargetTrack *target, const NavState *nav,
 
 void recovery_guidance_update(const NavState *nav, float damping_gain, GuidanceOutput *out)
 {
+    /* 翻倾程度：机体 z 与导航系 z 的夹角 */
+    float tilt = acosf(clampf(quat_rotate(nav->att, vec3(0.0f, 0.0f, 1.0f)).z, -1.0f, 1.0f));
+
     out->pos_sp = nav->pos;
     out->use_pos_sp = 0u;
-    /* 速度阻尼：把残余速度压到 0 */
-    out->vel_sp = vec3_scale(nav->vel, -damping_gain);
     out->yaw_sp = nav->yaw;
+
+    if (tilt > 0.35f) {
+        /* 大翻倾：横向指令无意义（推力方向错误），只轻推爬升保高度，
+         * 等低层姿态环改平 */
+        out->vel_sp = vec3(0.0f, 0.0f, 0.4f);
+    } else {
+        /* 速度阻尼：把残余速度压到 0，附带轻微爬升恢复撞击损失的高度 */
+        out->vel_sp = vec3_scale(nav->vel, -damping_gain);
+        out->vel_sp.z += 0.2f;
+    }
 }
 
 void home_guidance_update(const HomeTrack *home, const NavState *nav,

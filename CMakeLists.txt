@@ -90,6 +90,12 @@ foreach(seed 11 12 13 14 15 16 17 18 19 20)
     set_tests_properties(mc_lost_${seed} PROPERTIES
         PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
 endforeach()
+# 剧烈撞击（大翻倾恢复）
+foreach(seed 21 22 23 24 25)
+    add_test(NAME mc_hard_${seed} COMMAND mission_sim --hard-impact --seed ${seed})
+    set_tests_properties(mc_hard_${seed} PROPERTIES
+        PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+endforeach()
 add_test(NAME mc_truth_mode COMMAND mission_sim --truth-mode --seed 5)
 set_tests_properties(mc_truth_mode PROPERTIES
     PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")

@@ -59,6 +59,12 @@ typedef struct {
     float impact_range_m;    /* TERMINAL 中距目标小于该值时发生接触 */
     float vision_freeze_s;   /* 撞击后视觉冻结时长 */
     uint32_t seed;
+
+    /* 撞击强度（--hard-impact 覆盖为剧烈翻倾） */
+    Vec3f impact_delta_v;
+    float impact_delta_yaw;
+    float impact_delta_pitch;
+    float impact_delta_roll;
 } Scenario;
 
 /* 默认场景：基座在原点，搜索区约 4 m 外，目标在搜索区内 */

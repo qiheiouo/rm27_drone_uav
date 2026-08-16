@@ -25,6 +25,7 @@ void scenario_default(Scenario *sc)
     sc->mission.terminal_range_m = 1.5f;
     sc->mission.target_lost_timeout_s = 1.0f;
     sc->mission.recovery_hold_s = 1.2f;
+    sc->mission.recovery_tilt_ok_rad = 0.30f;
     sc->mission.breakaway_height_m = 0.5f;
     sc->mission.home_region_tol_m = 0.4f;
     sc->mission.home_search_alt_m = 0.8f;
@@ -57,10 +58,11 @@ void scenario_default(Scenario *sc)
     sc->estimator.kp_vo_vel = 3.0f;
     sc->estimator.kp_vo_yaw = 0.0f;
     sc->estimator.kp_tof = 2.0f;
+    sc->estimator.kp_tof_vel = 8.0f;
 
     /* ---- 撞击检测（比力偏离 1g 判定） ---- */
     sc->impact.accel_spike_threshold = 12.0f;  /* m/s^2 偏离 1g；机动 <7，撞击 >100 */
-    sc->impact.gyro_spike_threshold = 6.0f;    /* rad/s */
+    sc->impact.gyro_spike_threshold = 12.0f;   /* rad/s；机动 <=10，撞击 >100 */
     sc->impact.confirm_samples = 1u;
 
     /* ---- 安全 ---- */
@@ -80,18 +82,18 @@ void scenario_default(Scenario *sc)
     sc->dynamics.drag = 0.5f;
     sc->dynamics.max_speed = 2.5f;
     sc->dynamics.max_yaw_rate = 3.0f;
-    sc->dynamics.max_att_rate = 5.0f;
+    sc->dynamics.max_att_rate = 10.0f;   /* 140mm 小机姿态环带宽 */
 
     /* ---- 末端制导 ---- */
     sc->terminal.approach_speed = 1.2f;
     sc->terminal.kp = 1.5f;
-    sc->terminal.min_closing_speed = 0.3f;
+    sc->terminal.min_closing_speed = 0.2f;
 
     /* ---- 基座制导 ---- */
     sc->home_guidance.search_alt = 0.8f;
     sc->home_guidance.descend_speed = 0.3f;
-    sc->home_guidance.kp_lateral = 1.5f;
-    sc->home_guidance.max_lateral_speed = 0.5f;
+    sc->home_guidance.kp_lateral = 1.0f;
+    sc->home_guidance.max_lateral_speed = 0.4f;
     sc->home_guidance.lateral_tol = 0.10f;
     sc->home_guidance.spiral_rate = 0.25f;
     sc->home_guidance.spiral_max_radius = 1.5f;
@@ -121,7 +123,13 @@ void scenario_default(Scenario *sc)
     /* ---- 仿真控制 ---- */
     sc->dt = 0.01f;                  /* 100 Hz 导航/控制环 */
     sc->sim_max_time_s = 60.0f;      /* 仿真上限（任务预算 30 s 由 safety 保证） */
-    sc->impact_range_m = 0.15f;
+    sc->impact_range_m = 0.25f;      /* 接触球：目标 0.3m + 机体 0.14m 半径和 */
     sc->vision_freeze_s = 0.4f;
     sc->seed = 12345u;
+
+    /* 默认撞击：弹开 + 中等倾角扰动 */
+    sc->impact_delta_v = vec3(-1.8f, 1.2f, 0.9f);
+    sc->impact_delta_yaw = 0.9f;
+    sc->impact_delta_pitch = 0.5f;
+    sc->impact_delta_roll = 0.4f;
 }
