@@ -22,7 +22,9 @@
 
 #include "scenario.h"
 #include "sim_sensors.h"
+#include "sim_vision.h"
 #include "camera.h"
+#include "vision_frontend.h"
 #include "mission_fsm.h"
 #include "guidance.h"
 #include "agent_state.h"
@@ -38,6 +40,8 @@ int main(int argc, char **argv)
             sc.estimator.lost_on_impact = 1u;
         } else if (strcmp(argv[i], "--truth-mode") == 0) {
             sc.estimator.mode = EST_MODE_TRUTH;
+        } else if (strcmp(argv[i], "--sim-vo") == 0) {
+            sc.use_flow_vo = 0u;   /* 对照：合成 VO（注入漂移模型） */
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             sc.seed = (uint32_t)strtoul(argv[++i], 0, 10);
         } else {
@@ -57,11 +61,14 @@ int main(int argc, char **argv)
     MissionFsm     fsm;
     SwarmView      swarm;          /* 第一版 other_count = 0 */
     CollisionConfig collision_cfg;
+    VisionFrontend vf;             /* 光流 VO 前端 */
+    SimVisionWorld vision_world;   /* 地面特征点（仅仿真侧） */
 
     sim_dynamics_init(&sim, sc.home_pos, 0.0f);
     sim_sensors_init(&sensors, sc.seed);
     if (sc.estimator.mode == EST_MODE_TRUTH) {
-        /* 对照组 = 理想真值透传（第一阶段语义）：VO 无漂移无噪声 */
+        /* 对照组 = 理想真值透传（第一阶段语义）：合成 VO 无漂移无噪声 */
+        sc.use_flow_vo = 0u;
         sensors.vo_drift_vel = vec3_zero();
         sensors.vo_yaw_drift_rate = 0.0f;
         sensors.vo_pos_noise = 0.0f;
@@ -77,6 +84,8 @@ int main(int argc, char **argv)
                      &sc.outbound_route, &sc.search_route);
     swarm_view_init(&swarm, 1u);
     collision_init(&collision_cfg, 0.6f);
+    vf_init(&vf, &sc.flow, &sc.cam_down);
+    sim_vision_world_init(&vision_world, sc.seed, sc.feature_area_m, sc.feature_count);
 
     CtrlOutput ctrl = { {0.0f, 0.0f, 0.0f}, 0.0f };
 
@@ -103,11 +112,23 @@ int main(int argc, char **argv)
         OdomSample vo;
         PixelObs   tpix, hpix;
         sim_sensors_imu(&sensors, &sim, t_ms, &imu);
-        sim_sensors_vo(&sensors, &sim, vision_freeze, sc.dt, t_ms, &vo);
         sim_sensors_target(&sensors, &sim, &sc.cam_forward, sc.target_pos,
                            sc.target_size_m, vision_freeze, t_ms, &tpix);
         sim_sensors_home(&sensors, &sim, &sc.cam_down, sc.home_pos,
                          sc.marker_size_m, vision_freeze, t_ms, &hpix);
+
+        /* VO：光流前端（默认）或合成 VO（对照） */
+        if (sc.use_flow_vo) {
+            FlowFrame frame;
+            sim_vision_frame(&sensors, &vision_world, &sim, &sc.cam_down,
+                             vision_freeze, t_ms, &frame);
+            /* ToF 提供独立高度尺度；姿态用上一 tick（帧处理延迟） */
+            float tof = sim_sensors_tof(&sensors, &sim);
+            vf_update(&vf, &frame, imu.gyro, estimator.out.att,
+                      tof, sc.dt, &vo);
+        } else {
+            sim_sensors_vo(&sensors, &sim, vision_freeze, sc.dt, t_ms, &vo);
+        }
 
         /* ---- 估计 / 撞击检测 ---- */
         estimator_update(&estimator, &imu, &vo, sc.dt);
@@ -146,6 +167,7 @@ int main(int argc, char **argv)
             float correction = vec3_dist(abs_ref.pos, estimator.out.pos);
             if (correction >= 0.05f || estimator.out.status != EST_TRACKING) {
                 estimator_notify_relocalized(&estimator, &abs_ref);
+                vf_set_pose(&vf, abs_ref.pos, abs_ref.yaw);  /* VO 系对齐 */
                 last_relocalize_t = t;
                 printf("[t=%6.2f] EVENT relocalized on base marker (drift was %.2f m)\n",
                        t, vec3_dist(estimator.out.pos, sim.pos));

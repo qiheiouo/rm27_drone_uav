@@ -34,6 +34,22 @@ void sim_sensors_init(SimSensors *sen, uint32_t seed)
     sen->pixel_noise = 1.0f;
     sen->target_min_px = 15.0f;   /* fx=180, 0.3m 目标 → 检测距离上限约 3.6 m */
     sen->home_min_px = 8.0f;
+    sen->tof_noise = 0.01f;
+}
+
+float sim_sensors_tof(SimSensors *sen, const SimState *truth)
+{
+    /* 机体 z 轴在导航系的投影 → 斜距换算 */
+    Vec3f zb = quat_rotate(truth->att, vec3(0.0f, 0.0f, 1.0f));
+    float cos_tilt = fabsf(zb.z);
+    if (cos_tilt < 0.3f) {
+        cos_tilt = 0.3f;   /* 大倾角时测距不可靠，截断 */
+    }
+    float h = truth->pos.z / cos_tilt;
+    if (h < 0.0f) {
+        h = 0.0f;
+    }
+    return h + lcg_gauss(sen, sen->tof_noise);
 }
 
 void sim_sensors_imu(SimSensors *sen, const SimState *truth, uint32_t t_ms, ImuSample *out)

@@ -49,9 +49,13 @@ void scenario_default(Scenario *sc)
     sc->estimator.lost_on_impact = 0u;      /* 默认退化不丢失；置 1 演练最坏情况 */
     sc->estimator.kp_tilt = 2.0f;
     sc->estimator.ki_gyro_bias = 0.05f;
+    /* VO 互补校正增益 (1/s)。
+     * kp_vo_yaw = 0：光流 VO 的偏航与 INS 偏航同源（同一陀螺积分），
+     * 校正只会把撞击/冻结期间 vf 偏航的瞬时错误灌回估计器（正反馈）。
+     * 偏航漂移由重定位时的 vf_set_pose 对齐来兜底。 */
     sc->estimator.kp_vo_pos = 2.0f;
     sc->estimator.kp_vo_vel = 3.0f;
-    sc->estimator.kp_vo_yaw = 1.0f;
+    sc->estimator.kp_vo_yaw = 0.0f;
 
     /* ---- 撞击检测（比力偏离 1g 判定） ---- */
     sc->impact.accel_spike_threshold = 12.0f;  /* m/s^2 偏离 1g；机动 <7，撞击 >100 */
@@ -103,6 +107,15 @@ void scenario_default(Scenario *sc)
                 320.0f, 240.0f, CAM_MOUNT_DOWN);
     sc->target_size_m = 0.30f;
     sc->marker_size_m = 0.25f;
+
+    /* ---- VO 前端（光流里程计） ---- */
+    sc->use_flow_vo = 1u;
+    sc->flow.min_height = 0.05f;
+    sc->flow.max_height = 5.0f;
+    sc->flow.min_features = 4u;
+    sc->flow.outlier_residual_px = 3.0f;
+    sc->feature_area_m = 14.0f;
+    sc->feature_count = 4000u;   /* ~20 点/m²：低空（停靠段）也能保持 >=4 个可见 */
 
     /* ---- 仿真控制 ---- */
     sc->dt = 0.01f;                  /* 100 Hz 导航/控制环 */

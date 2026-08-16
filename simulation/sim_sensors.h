@@ -45,6 +45,7 @@ typedef struct {
     float pixel_noise;       /* 像素噪声 sigma (px) */
     float target_min_px;     /* 最小可检测像素尺寸（等效检测距离上限） */
     float home_min_px;
+    float tof_noise;         /* ToF 测距噪声 sigma (m) */
 } SimSensors;
 
 void sim_sensors_init(SimSensors *sen, uint32_t seed);
@@ -52,9 +53,13 @@ void sim_sensors_init(SimSensors *sen, uint32_t seed);
 /* IMU：机体系比力 + 陀螺 */
 void sim_sensors_imu(SimSensors *sen, const SimState *truth, uint32_t t_ms, ImuSample *out);
 
-/* VO：位置/速度/偏航 + 漂移；vision_freeze=1 时本帧无效 */
+/* VO：位置/速度/偏航 + 漂移；vision_freeze=1 时本帧无效（--sim-vo 对照路径） */
 void sim_sensors_vo(SimSensors *sen, const SimState *truth,
                     uint8_t vision_freeze, float dt, uint32_t t_ms, OdomSample *out);
+
+/* ToF 测距：沿机体 -z 到地面（z=0）的距离，含噪声。
+ * 为光流提供独立于估计器的高度尺度（打破 scale 正反馈） */
+float sim_sensors_tof(SimSensors *sen, const SimState *truth);
 
 /* 目标像素观测（前视相机）；vision_freeze=1 模拟撞击后运动模糊 */
 void sim_sensors_target(SimSensors *sen, const SimState *truth, const CameraModel *cam,

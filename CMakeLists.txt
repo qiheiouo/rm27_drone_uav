@@ -19,11 +19,13 @@ add_library(nav_core STATIC
     perception/target_tracker/target_tracker.c
     perception/home_detector/home_detector.c
     perception/camera/camera.c
+    perception/vision_frontend/vision_frontend.c
     flight/controller_interface/pos_controller.c
     swarm/collision_interface/collision_interface.c
     simulation/scenario.c
     simulation/sim_dynamics.c
     simulation/sim_sensors.c
+    simulation/sim_vision.c
 )
 
 target_include_directories(nav_core PUBLIC
@@ -61,7 +63,7 @@ target_link_libraries(mission_sim PRIVATE nav_core)
 
 enable_testing()
 
-foreach(t test_math test_impact_detector test_mission_fsm test_camera test_ins_estimator)
+foreach(t test_math test_impact_detector test_mission_fsm test_camera test_ins_estimator test_vision_frontend)
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core)
     add_test(NAME ${t} COMMAND ${t})

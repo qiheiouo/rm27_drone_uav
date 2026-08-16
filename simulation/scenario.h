@@ -16,6 +16,7 @@
 #include "pos_controller.h"
 #include "guidance.h"
 #include "camera.h"
+#include "vision_frontend.h"
 #include "sim_dynamics.h"
 
 #ifdef __cplusplus
@@ -42,9 +43,15 @@ typedef struct {
 
     /* 相机（第二阶段：像素级检测链路） */
     CameraModel       cam_forward;   /* 前视：目标检测 */
-    CameraModel       cam_down;      /* 下视：基座 marker */
+    CameraModel       cam_down;      /* 下视：基座 marker + 光流 */
     float             target_size_m; /* 目标真实尺寸（检测算法已知） */
     float             marker_size_m; /* 基座 marker 真实尺寸 */
+
+    /* VO 前端（第三阶段：光流里程计） */
+    uint8_t           use_flow_vo;   /* 1 = 光流前端；0 = 仿真 VO（对照） */
+    FlowConfig        flow;
+    float             feature_area_m;    /* 地面特征点散布范围 */
+    uint16_t          feature_count;     /* 地面特征点数量 */
 
     /* 仿真控制 */
     float dt;
