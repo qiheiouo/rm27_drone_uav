@@ -33,6 +33,7 @@ add_library(nav_core STATIC
 )
 
 add_library(nav_sim STATIC
+    simulation/fault_injection.c
     simulation/scenario.c
     simulation/sim_dynamics.c
     simulation/sim_sensors.c
@@ -101,10 +102,26 @@ foreach(t
     test_swarm
     test_nav_runtime
     test_diagnostics
+    test_fault_injection
 )
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core nav_sim)
     add_test(NAME ${t} COMMAND ${t})
+endforeach()
+
+foreach(scenario
+    flow-dropout
+    target-freeze
+    home-delay
+    nan-target
+    imu-stale
+    imu-duplicate
+    imu-rollback
+    watchdog-overrun
+)
+    add_test(NAME fault_${scenario} COMMAND mission_sim --scenario ${scenario})
+    set_tests_properties(fault_${scenario} PROPERTIES
+        PASS_REGULAR_EXPRESSION "FAULT_REGRESSION_SUCCESS")
 endforeach()
 
 # 完整闭环作为集成测试：必须输出 MISSION_SUCCESS

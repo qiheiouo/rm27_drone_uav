@@ -59,6 +59,9 @@ void scenario_default(Scenario *scenario)
     scenario->home_loss_end_s = -1.0f;
     scenario->other_agent_enabled = 0u;
     agent_state_clear(&scenario->other_agent);
+    sim_fault_plan_init(&scenario->fault_plan);
+    memset(&scenario->expectations, 0, sizeof(scenario->expectations));
+    scenario->expectations.outcome = SCENARIO_EXPECT_COMPLETE;
 }
 
 void scenario_runtime_config(const Scenario *scenario, NavRuntimeConfig *cfg)
@@ -146,6 +149,98 @@ int scenario_apply_kind(Scenario *scenario, const char *name)
         scenario->other_agent.pos = vec3(1.8f, -1.1f, 1.2f);
         scenario->other_agent.vel = vec3(0.0f, 0.20f, 0.0f);
         scenario->swarm_avoidance.mode = SWARM_ENABLED;
+    } else if (strcmp(name, "flow-dropout") == 0) {
+        scenario->kind = SCENARIO_FLOW_DROPOUT;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_FLOW, SIM_FAULT_DROPOUT,
+            3000u, 3900u, 0u, 0u);
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.require_estimator_degraded = 1u;
+        scenario->expectations.require_estimator_recovered = 1u;
+    } else if (strcmp(name, "target-freeze") == 0) {
+        scenario->kind = SCENARIO_TARGET_FREEZE;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_TARGET, SIM_FAULT_FREEZE_TIMESTAMP,
+            7000u, 7600u, 0u, 0u);
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags = NAV_EVENT_INPUT_REJECTED;
+        scenario->expectations.required_log_code_mask =
+            1u << NAV_LOG_INPUT_DUPLICATE;
+        scenario->expectations.required_duplicate_source_mask =
+            NAV_INPUT_SOURCE_TARGET;
+        scenario->expectations.require_target_unavailable = 1u;
+        scenario->expectations.require_target_recovered = 1u;
+    } else if (strcmp(name, "home-delay") == 0) {
+        scenario->kind = SCENARIO_HOME_DELAY;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_HOME, SIM_FAULT_DELAY_TIMESTAMP,
+            16500u, 17200u, 400u, 0u);
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags = NAV_EVENT_INPUT_REJECTED;
+        scenario->expectations.required_log_code_mask =
+            1u << NAV_LOG_INPUT_STALE;
+        scenario->expectations.required_stale_source_mask = NAV_INPUT_SOURCE_HOME;
+        scenario->expectations.require_home_unavailable = 1u;
+        scenario->expectations.require_home_recovered = 1u;
+    } else if (strcmp(name, "nan-target") == 0) {
+        scenario->kind = SCENARIO_NAN_TARGET;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_TARGET, SIM_FAULT_NONFINITE,
+            7000u, 7300u, 0u, 0u);
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags = NAV_EVENT_INPUT_REJECTED;
+        scenario->expectations.required_log_code_mask =
+            1u << NAV_LOG_INPUT_INVALID;
+        scenario->expectations.required_invalid_source_mask =
+            NAV_INPUT_SOURCE_TARGET;
+        scenario->expectations.require_target_unavailable = 1u;
+        scenario->expectations.require_target_recovered = 1u;
+    } else if (strcmp(name, "imu-stale") == 0) {
+        scenario->kind = SCENARIO_IMU_STALE;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_IMU, SIM_FAULT_DELAY_TIMESTAMP,
+            3000u, 3100u, 100u, 1u);
+        scenario->expectations.outcome = SCENARIO_EXPECT_RUNTIME_REJECT;
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags = NAV_EVENT_INPUT_REJECTED;
+        scenario->expectations.required_log_code_mask =
+            1u << NAV_LOG_INPUT_STALE;
+        scenario->expectations.required_stale_source_mask = NAV_INPUT_SOURCE_IMU;
+    } else if (strcmp(name, "imu-duplicate") == 0) {
+        scenario->kind = SCENARIO_IMU_DUPLICATE;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_IMU, SIM_FAULT_FREEZE_TIMESTAMP,
+            3000u, 3100u, 0u, 0u);
+        scenario->expectations.outcome = SCENARIO_EXPECT_RUNTIME_REJECT;
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags = NAV_EVENT_INPUT_REJECTED;
+        scenario->expectations.required_log_code_mask =
+            1u << NAV_LOG_INPUT_DUPLICATE;
+        scenario->expectations.required_duplicate_source_mask = NAV_INPUT_SOURCE_IMU;
+    } else if (strcmp(name, "imu-rollback") == 0) {
+        scenario->kind = SCENARIO_IMU_ROLLBACK;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_IMU, SIM_FAULT_ROLLBACK_TIMESTAMP,
+            3000u, 3100u, 50u, 1u);
+        scenario->expectations.outcome = SCENARIO_EXPECT_RUNTIME_REJECT;
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags = NAV_EVENT_INPUT_REJECTED;
+        scenario->expectations.required_log_code_mask =
+            1u << NAV_LOG_INPUT_OUT_OF_ORDER;
+        scenario->expectations.required_out_of_order_source_mask =
+            NAV_INPUT_SOURCE_IMU;
+    } else if (strcmp(name, "watchdog-overrun") == 0) {
+        scenario->kind = SCENARIO_WATCHDOG_OVERRUN;
+        (void)sim_fault_plan_add(&scenario->fault_plan,
+            SIM_FAULT_SOURCE_SCHEDULER, SIM_FAULT_CYCLE_OVERRUN,
+            3000u, 3100u, 60u, 2u);
+        scenario->expectations.outcome = SCENARIO_EXPECT_EMERGENCY_LAND;
+        scenario->expectations.required_fault_rule_mask = 1u;
+        scenario->expectations.required_event_flags =
+            NAV_EVENT_WATCHDOG_OVERRUN | NAV_EVENT_WATCHDOG_TRIPPED;
+        scenario->expectations.required_log_code_mask =
+            (1u << NAV_LOG_WATCHDOG_OVERRUN) |
+            (1u << NAV_LOG_WATCHDOG_TRIPPED);
     } else {
         return -1;
     }
@@ -166,6 +261,14 @@ const char *scenario_kind_name(ScenarioKind kind)
     case SCENARIO_LOCAL_OBSTACLE: return "local-obstacle";
     case SCENARIO_FORCED_RETURN: return "forced-return";
     case SCENARIO_TWO_AGENT_CONFLICT: return "two-agent-conflict";
+    case SCENARIO_FLOW_DROPOUT: return "flow-dropout";
+    case SCENARIO_TARGET_FREEZE: return "target-freeze";
+    case SCENARIO_HOME_DELAY: return "home-delay";
+    case SCENARIO_NAN_TARGET: return "nan-target";
+    case SCENARIO_IMU_STALE: return "imu-stale";
+    case SCENARIO_IMU_DUPLICATE: return "imu-duplicate";
+    case SCENARIO_IMU_ROLLBACK: return "imu-rollback";
+    case SCENARIO_WATCHDOG_OVERRUN: return "watchdog-overrun";
     default: return "unknown";
     }
 }

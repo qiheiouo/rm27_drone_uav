@@ -20,11 +20,178 @@ static void print_scenarios(void)
     printf("local-obstacle\n");
     printf("forced-return\n");
     printf("two-agent-conflict\n");
+    printf("flow-dropout\n");
+    printf("target-freeze\n");
+    printf("home-delay\n");
+    printf("nan-target\n");
+    printf("imu-stale\n");
+    printf("imu-duplicate\n");
+    printf("imu-rollback\n");
+    printf("watchdog-overrun\n");
 }
 
 static uint8_t in_window(float time, float start, float end)
 {
     return (start >= 0.0f && time >= start && time <= end) ? 1u : 0u;
+}
+
+typedef struct {
+    uint32_t event_flags;
+    uint32_t log_code_mask;
+    uint32_t stale_source_mask;
+    uint32_t duplicate_source_mask;
+    uint32_t out_of_order_source_mask;
+    uint32_t nonfinite_source_mask;
+    uint32_t invalid_source_mask;
+    uint8_t estimator_degraded;
+    uint8_t estimator_recovered;
+    uint8_t target_unavailable;
+    uint8_t target_recovered;
+    uint8_t home_unavailable;
+    uint8_t home_recovered;
+    uint8_t outputs_finite;
+} FaultRegressionObservation;
+
+static uint8_t quaternion_is_finite(Quatf q)
+{
+    return (nav_isfinite(q.w) && nav_isfinite(q.x) &&
+            nav_isfinite(q.y) && nav_isfinite(q.z)) ? 1u : 0u;
+}
+
+static uint8_t runtime_output_is_finite(const NavRuntimeOutput *output)
+{
+    return (vec3_is_finite(output->nav.pos) &&
+            vec3_is_finite(output->nav.vel) &&
+            quaternion_is_finite(output->nav.att) &&
+            nav_isfinite(output->nav.yaw) &&
+            nav_isfinite(output->nav.yaw_rate) &&
+            vec3_is_finite(output->guidance.pos_sp) &&
+            vec3_is_finite(output->guidance.vel_sp) &&
+            vec3_is_finite(output->guidance.accel_sp) &&
+            nav_isfinite(output->guidance.yaw_sp) &&
+            vec3_is_finite(output->control.accel_cmd) &&
+            nav_isfinite(output->control.yaw_rate_cmd)) ? 1u : 0u;
+}
+
+static uint8_t fault_source_active(const SimFaultPlan *plan,
+                                   const SimFaultState *state,
+                                   SimFaultSource source)
+{
+    uint8_t index;
+    for (index = 0u; index < plan->count; index++) {
+        if ((state->active_rule_mask & (1u << index)) != 0u &&
+            plan->rules[index].source == source) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static uint8_t fault_source_applied(const SimFaultState *state,
+                                    SimFaultSource source)
+{
+    return (state->applied_source_mask & (1u << (uint8_t)source)) != 0u
+        ? 1u : 0u;
+}
+
+static void observe_runtime(const Scenario *scenario,
+                            const SimFaultState *fault_state,
+                            const NavRuntimeOutput *output,
+                            const NavEventLog *event_log,
+                            FaultRegressionObservation *observation)
+{
+    NavEventRecord record;
+    uint16_t log_index;
+    observation->event_flags |= output->event_flags;
+    observation->stale_source_mask |= output->health.stale_source_mask;
+    observation->duplicate_source_mask |= output->health.duplicate_source_mask;
+    observation->out_of_order_source_mask |=
+        output->health.out_of_order_source_mask;
+    observation->nonfinite_source_mask |= output->health.nonfinite_source_mask;
+    observation->invalid_source_mask |= output->health.invalid_source_mask;
+    for (log_index = 0u; log_index < nav_event_log_count(event_log);
+         log_index++) {
+        if (nav_event_log_get(event_log, log_index, &record) &&
+            (uint32_t)record.code < 32u) {
+            observation->log_code_mask |= 1u << (uint32_t)record.code;
+        }
+    }
+
+    if (fault_source_active(&scenario->fault_plan, fault_state,
+                            SIM_FAULT_SOURCE_FLOW) &&
+        (output->nav.status == EST_DEGRADED || output->nav.status == EST_LOST ||
+         output->nav.status == EST_RECOVERING)) {
+        observation->estimator_degraded = 1u;
+    }
+    if (fault_source_applied(fault_state, SIM_FAULT_SOURCE_FLOW) &&
+        !fault_source_active(&scenario->fault_plan, fault_state,
+                             SIM_FAULT_SOURCE_FLOW) &&
+        (output->nav.status == EST_TRACKING ||
+         output->nav.status == EST_RELOCALIZED)) {
+        observation->estimator_recovered = 1u;
+    }
+    if (fault_source_active(&scenario->fault_plan, fault_state,
+                            SIM_FAULT_SOURCE_TARGET) &&
+        (!output->target.visible ||
+         output->target.status != TARGET_TRACK_TRACKING)) {
+        observation->target_unavailable = 1u;
+    }
+    if (fault_source_applied(fault_state, SIM_FAULT_SOURCE_TARGET) &&
+        !fault_source_active(&scenario->fault_plan, fault_state,
+                             SIM_FAULT_SOURCE_TARGET) &&
+        output->target.visible &&
+        output->target.status == TARGET_TRACK_TRACKING) {
+        observation->target_recovered = 1u;
+    }
+    if (fault_source_active(&scenario->fault_plan, fault_state,
+                            SIM_FAULT_SOURCE_HOME) && !output->home.visible) {
+        observation->home_unavailable = 1u;
+    }
+    if (fault_source_applied(fault_state, SIM_FAULT_SOURCE_HOME) &&
+        !fault_source_active(&scenario->fault_plan, fault_state,
+                             SIM_FAULT_SOURCE_HOME) && output->home.visible) {
+        observation->home_recovered = 1u;
+    }
+    if (!runtime_output_is_finite(output)) {
+        observation->outputs_finite = 0u;
+    }
+}
+
+static uint8_t fault_expectations_met(const Scenario *scenario,
+                                      const SimFaultState *fault_state,
+                                      const FaultRegressionObservation *observed)
+{
+    const ScenarioExpectations *expected = &scenario->expectations;
+    if ((fault_state->applied_rule_mask & expected->required_fault_rule_mask) !=
+        expected->required_fault_rule_mask) return 0u;
+    if ((observed->event_flags & expected->required_event_flags) !=
+        expected->required_event_flags) return 0u;
+    if ((observed->log_code_mask & expected->required_log_code_mask) !=
+        expected->required_log_code_mask) return 0u;
+    if ((observed->stale_source_mask & expected->required_stale_source_mask) !=
+        expected->required_stale_source_mask) return 0u;
+    if ((observed->duplicate_source_mask & expected->required_duplicate_source_mask) !=
+        expected->required_duplicate_source_mask) return 0u;
+    if ((observed->out_of_order_source_mask &
+         expected->required_out_of_order_source_mask) !=
+        expected->required_out_of_order_source_mask) return 0u;
+    if ((observed->nonfinite_source_mask & expected->required_nonfinite_source_mask) !=
+        expected->required_nonfinite_source_mask) return 0u;
+    if ((observed->invalid_source_mask & expected->required_invalid_source_mask) !=
+        expected->required_invalid_source_mask) return 0u;
+    if (expected->require_estimator_degraded && !observed->estimator_degraded)
+        return 0u;
+    if (expected->require_estimator_recovered && !observed->estimator_recovered)
+        return 0u;
+    if (expected->require_target_unavailable && !observed->target_unavailable)
+        return 0u;
+    if (expected->require_target_recovered && !observed->target_recovered)
+        return 0u;
+    if (expected->require_home_unavailable && !observed->home_unavailable)
+        return 0u;
+    if (expected->require_home_recovered && !observed->home_recovered)
+        return 0u;
+    return observed->outputs_finite;
 }
 
 int main(int argc, char **argv)
@@ -35,6 +202,8 @@ int main(int argc, char **argv)
     SimVisionWorld vision_world;
     NavRuntimeConfig runtime_config;
     NavRuntime runtime;
+    SimFaultState fault_state;
+    FaultRegressionObservation fault_observation;
     float last_impact_time = -100.0f;
     float time = 0.0f;
     float max_position_error = 0.0f;
@@ -46,6 +215,7 @@ int main(int argc, char **argv)
     uint8_t trajectory_detour_exercised = 0u;
     uint8_t forced_return_exercised = 0u;
     uint8_t swarm_conflict_exercised = 0u;
+    uint32_t announced_fault_mask = 0u;
     int argument_index;
 
     scenario_default(&scenario);
@@ -84,6 +254,9 @@ int main(int argc, char **argv)
 
     sim_dynamics_init(&simulation, scenario.home_pos, 0.0f);
     sim_sensors_init(&sensors, scenario.seed);
+    sim_fault_state_init(&fault_state);
+    memset(&fault_observation, 0, sizeof(fault_observation));
+    fault_observation.outputs_finite = 1u;
     if (scenario.estimator.mode == EST_MODE_TRUTH) {
         scenario.use_flow_vo = 0u;
         sensors.vo_drift_vel = vec3_zero();
@@ -176,9 +349,52 @@ int main(int argc, char **argv)
         input.wireless_charge_ready = dock_contact;
         input.dt = scenario.dt;
 
+        sim_fault_apply(&scenario.fault_plan, &fault_state, time_ms, &input,
+                        &imu, &flow_frame, &odometry,
+                        &target_pixel, &home_pixel);
+        if ((fault_state.applied_rule_mask & ~announced_fault_mask) != 0u) {
+            uint8_t fault_index;
+            for (fault_index = 0u; fault_index < scenario.fault_plan.count;
+                 fault_index++) {
+                uint32_t fault_bit = 1u << fault_index;
+                if ((fault_state.applied_rule_mask & fault_bit) != 0u &&
+                    (announced_fault_mask & fault_bit) == 0u) {
+                    const SimFaultRule *rule =
+                        &scenario.fault_plan.rules[fault_index];
+                    printf("[t=%6.2f] FAULT source=%s mode=%s\n", time,
+                           sim_fault_source_name(rule->source),
+                           sim_fault_mode_name(rule->mode));
+                    announced_fault_mask |= fault_bit;
+                }
+            }
+        }
+
         if (!nav_runtime_step(&runtime, &input)) {
+            observe_runtime(&scenario, &fault_state, &runtime.output,
+                            nav_runtime_event_log(&runtime),
+                            &fault_observation);
+            if (scenario.expectations.outcome ==
+                    SCENARIO_EXPECT_RUNTIME_REJECT &&
+                !runtime.output.armed && !runtime.output.step_valid &&
+                vec3_norm(runtime.output.control.accel_cmd) <= 1e-6f &&
+                fabsf(runtime.output.control.yaw_rate_cmd) <= 1e-6f &&
+                fault_expectations_met(&scenario, &fault_state,
+                                       &fault_observation)) {
+                printf("[t=%6.2f] FAULT_REGRESSION_SUCCESS scenario=%s "
+                       "outcome=runtime-reject control=zero\n",
+                       time, scenario.name);
+                return 0;
+            }
             printf("MISSION_FAILED scenario=%s runtime rejected input\n", scenario.name);
             return 5;
+        }
+        observe_runtime(&scenario, &fault_state, &runtime.output,
+                        nav_runtime_event_log(&runtime),
+                        &fault_observation);
+        if (!fault_observation.outputs_finite) {
+            printf("MISSION_FAILED scenario=%s non-finite runtime output\n",
+                   scenario.name);
+            return 6;
         }
 
         if ((runtime.output.event_flags & NAV_EVENT_IMPACT_CONFIRMED) != 0u) {
@@ -293,6 +509,8 @@ int main(int argc, char **argv)
 
         if (runtime.output.mission.mission_complete) {
             uint8_t expectations_met = 1u;
+            if (scenario.expectations.outcome != SCENARIO_EXPECT_COMPLETE)
+                expectations_met = 0u;
             if (scenario.kind == SCENARIO_TARGET_LOSS && !target_loss_exercised)
                 expectations_met = 0u;
             if ((scenario.kind == SCENARIO_IMPACT_DEGRADED ||
@@ -309,6 +527,10 @@ int main(int argc, char **argv)
                 expectations_met = 0u;
             if (scenario.kind == SCENARIO_TWO_AGENT_CONFLICT && !swarm_conflict_exercised)
                 expectations_met = 0u;
+            if (scenario.fault_plan.count > 0u &&
+                !fault_expectations_met(&scenario, &fault_state,
+                                        &fault_observation))
+                expectations_met = 0u;
             if (!expectations_met) {
                 printf("[t=%6.2f] MISSION_FAILED scenario=%s expected branch not exercised\n",
                        time, scenario.name);
@@ -318,9 +540,26 @@ int main(int argc, char **argv)
                    "elapsed=%.2f s remaining=%.2f s max_est_err=%.2f m\n",
                    time, scenario.name, vec3_dist(simulation.pos, scenario.home_pos),
                    time, runtime.output.safety.remaining_s, max_position_error);
+            if (scenario.fault_plan.count > 0u) {
+                printf("[t=%6.2f] FAULT_REGRESSION_SUCCESS scenario=%s "
+                       "outcome=mission-complete applied=0x%02x\n",
+                       time, scenario.name,
+                       (unsigned int)fault_state.applied_rule_mask);
+            }
             return 0;
         }
         if (runtime.output.mission.mission_failed) {
+            if (scenario.expectations.outcome ==
+                    SCENARIO_EXPECT_EMERGENCY_LAND &&
+                runtime.output.mission.state == MS_EMERGENCY_LAND &&
+                fault_expectations_met(&scenario, &fault_state,
+                                       &fault_observation)) {
+                printf("[t=%6.2f] FAULT_REGRESSION_SUCCESS scenario=%s "
+                       "outcome=emergency-land watchdog=%u\n",
+                       time, scenario.name,
+                       (unsigned int)runtime.output.health.watchdog_tripped);
+                return 0;
+            }
             printf("[t=%6.2f] MISSION_FAILED scenario=%s emergency landed "
                    "max_est_err=%.2f m\n",
                    time, scenario.name, max_position_error);
