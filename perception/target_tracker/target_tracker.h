@@ -1,47 +1,63 @@
-/*
- * target_tracker.h - 目标相对定位/跟踪
- *
- * Plan 第 7 节第二层：发现目标后尽量脱离全局坐标，
- * 直接使用相对量（rel x/y/z 或图像误差）做视觉伺服。
- *
- * 第一阶段：观测量由仿真传感器给出（相对位置 + 可见性）。
- * 后续由 camera target detector 提供同样结构的观测量。
- */
+/* Fixed-memory alpha-beta target tracker for target-relative guidance. */
 #ifndef TARGET_TRACKER_H
 #define TARGET_TRACKER_H
 
 #include <stdint.h>
 #include "nav_math.h"
-#include "lowpass.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* 单帧目标观测（导航系下的相对位置；未来可换成图像误差 ex/ey/scale） */
+typedef enum {
+    TARGET_TRACK_LOST = 0,
+    TARGET_TRACK_TRACKING,
+    TARGET_TRACK_COASTING
+} TargetTrackStatus;
+
 typedef struct {
     uint8_t  visible;
-    Vec3f    rel_pos;        /* 目标相对机体位置 (m)，visible=1 时有效 */
+    Vec3f    rel_pos;          /* Target relative to vehicle in navigation frame (m). */
+    Vec3f    bearing;          /* Optional; derived from rel_pos when omitted. */
+    float    confidence;       /* [0,1]; <=0 is treated as legacy confidence 1. */
     uint32_t timestamp_ms;
 } TargetObs;
 
-/* 跟踪输出 */
 typedef struct {
-    uint8_t visible;             /* 当前帧可见 */
-    Vec3f   rel_pos;             /* 滤波后的相对位置 */
-    float   range;               /* 距离 (m) */
-    float   time_since_update;   /* 距上次有效观测的时间 (s) */
+    uint8_t  visible;
+    TargetTrackStatus status;
+    Vec3f    rel_pos;
+    Vec3f    rel_vel;
+    Vec3f    bearing;
+    float    range;
+    float    confidence;
+    float    time_since_update;
+    float    age;
+    uint32_t timestamp_ms;
 } TargetTrack;
 
 typedef struct {
-    LowPass1 fx, fy, fz;    /* 相对位置平滑 */
-    float    lost_time;
+    float alpha;
+    float beta;
+    float max_innovation_m;
+    float coast_timeout_s;
+    float lost_timeout_s;
+    float confidence_decay_per_s;
+} TargetTrackerConfig;
+
+typedef struct {
+    TargetTrackerConfig cfg;
     TargetTrack out;
+    float lost_time;
+    uint8_t initialized;
 } TargetTracker;
 
+void target_tracker_default_config(TargetTrackerConfig *cfg);
+void target_tracker_init_config(TargetTracker *trk, const TargetTrackerConfig *cfg);
 void target_tracker_init(TargetTracker *trk, float filter_cutoff_hz, float dt);
 void target_tracker_update(TargetTracker *trk, const TargetObs *obs, float dt);
 void target_tracker_reset(TargetTracker *trk);
+const char *target_track_status_name(TargetTrackStatus status);
 
 #ifdef __cplusplus
 }

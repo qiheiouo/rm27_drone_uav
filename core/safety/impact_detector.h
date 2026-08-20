@@ -1,10 +1,4 @@
-/*
- * impact_detector.h - 接触/撞击检测
- *
- * Plan 第 8 节：接触目标必须独立成状态模块，第一步是可靠检测。
- * 第一阶段使用加速度计模长尖峰 + 陀螺尖峰的组合判定，
- * 后续可加入 motor response / attitude error 通道。
- */
+/* Multi-channel, armed and debounced impact detector. */
 #ifndef IMPACT_DETECTOR_H
 #define IMPACT_DETECTOR_H
 
@@ -15,29 +9,70 @@
 extern "C" {
 #endif
 
-/* IMU 采样（机体系，仿真第一阶段直接用导航系近似） */
 typedef struct {
-    Vec3f    accel;      /* 比力/加速度 (m/s^2) */
-    Vec3f    gyro;       /* 角速度 (rad/s) */
+    Vec3f accel;
+    Vec3f gyro;
     uint32_t timestamp_ms;
 } ImuSample;
 
+typedef enum {
+    NO_IMPACT = 0,
+    POSSIBLE_IMPACT,
+    CONFIRMED_IMPACT
+} ImpactState;
+
 typedef struct {
-    float   accel_spike_threshold;  /* |accel| 偏离 1g 超过该值视为候选撞击 (m/s^2) */
-    float   gyro_spike_threshold;   /* |gyro| 超过该值视为候选撞击 (rad/s) */
-    uint8_t confirm_samples;        /* 连续确认帧数（抗振动误检） */
+    float accel_spike_threshold;
+    float gyro_spike_threshold;
+    uint8_t confirm_samples;
 } ImpactDetectorConfig;
 
 typedef struct {
+    float velocity_jump_threshold_mps;
+    float attitude_jump_threshold_rad;
+    float debounce_s;
+    float refractory_s;
+    float minimum_confidence;
+} ImpactFusionConfig;
+
+typedef struct {
+    ImpactState state;
+    float confidence;
+    uint8_t accel_evidence;
+    uint8_t gyro_evidence;
+    uint8_t velocity_evidence;
+    uint8_t attitude_evidence;
+    uint8_t rising_edge;
+} ImpactReport;
+
+typedef struct {
     ImpactDetectorConfig cfg;
-    uint8_t triggered;          /* 锁存：直到 reset */
+    ImpactFusionConfig fusion;
+    uint8_t triggered;
     uint8_t confirm_count;
+    uint8_t armed;
+    uint8_t have_previous_motion;
+    float candidate_time;
+    float refractory_remaining;
+    Vec3f previous_velocity;
+    Quatf previous_attitude;
+    uint32_t previous_timestamp_ms;
+    ImpactReport report;
 } ImpactDetector;
 
 void impact_detector_init(ImpactDetector *det, const ImpactDetectorConfig *cfg);
+void impact_detector_default_fusion_config(ImpactFusionConfig *cfg);
+void impact_detector_configure_fusion(ImpactDetector *det,
+                                      const ImpactFusionConfig *cfg);
+void impact_detector_arm(ImpactDetector *det, uint8_t armed);
 void impact_detector_reset(ImpactDetector *det);
-/* 返回 1 = 本帧确认新撞击（上升沿）；det->triggered 保持锁存 */
 uint8_t impact_detector_update(ImpactDetector *det, const ImuSample *sample);
+ImpactReport impact_detector_update_fused(ImpactDetector *det,
+                                          const ImuSample *sample,
+                                          Vec3f velocity,
+                                          Quatf attitude,
+                                          float dt);
+const char *impact_state_name(ImpactState state);
 
 #ifdef __cplusplus
 }

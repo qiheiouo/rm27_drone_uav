@@ -12,10 +12,13 @@ endif()
 add_library(nav_core STATIC
     core/planner/waypoint.c
     core/planner/trajectory.c
+    core/planner/trajectory_planner.c
     core/state_estimator/state_estimator.c
     core/mission/mission_fsm.c
     core/guidance/guidance.c
     core/safety/impact_detector.c
+    core/safety/impact_recovery.c
+    core/safety/obstacle_avoidance.c
     core/safety/safety_monitor.c
     perception/target_tracker/target_tracker.c
     perception/home_detector/home_detector.c
@@ -23,6 +26,11 @@ add_library(nav_core STATIC
     perception/vision_frontend/vision_frontend.c
     flight/controller_interface/pos_controller.c
     swarm/collision_interface/collision_interface.c
+    swarm/collision_interface/swarm_avoidance.c
+    swarm/trajectory_message/trajectory_message.c
+)
+
+add_library(nav_sim STATIC
     simulation/scenario.c
     simulation/sim_dynamics.c
     simulation/sim_sensors.c
@@ -46,13 +54,17 @@ target_include_directories(nav_core PUBLIC
     swarm/agent_state
     swarm/trajectory_message
     swarm/collision_interface
-    simulation
 )
+
+target_include_directories(nav_sim PUBLIC simulation)
+target_link_libraries(nav_sim PUBLIC nav_core)
 
 if(MSVC)
     target_compile_options(nav_core PRIVATE /W4)
+    target_compile_options(nav_sim PRIVATE /W4)
 else()
     target_compile_options(nav_core PRIVATE -Wall -Wextra)
+    target_compile_options(nav_sim PRIVATE -Wall -Wextra)
 endif()
 
 if(UNIX)
@@ -60,7 +72,7 @@ if(UNIX)
 endif()
 
 add_executable(mission_sim platform/host/main.c)
-target_link_libraries(mission_sim PRIVATE nav_core)
+target_link_libraries(mission_sim PRIVATE nav_sim)
 
 # STM32 移植层骨架：host 编译检查（板级函数仅声明，静态库无需链接）
 add_library(nav_stm32_port STATIC platform/stm32/nav_tasks.c)
@@ -68,9 +80,21 @@ target_link_libraries(nav_stm32_port PUBLIC nav_core)
 
 enable_testing()
 
-foreach(t test_math test_impact_detector test_mission_fsm test_camera test_ins_estimator test_vision_frontend test_trajectory)
+foreach(t
+    test_math
+    test_impact_detector
+    test_mission_fsm
+    test_camera
+    test_ins_estimator
+    test_vision_frontend
+    test_trajectory
+    test_tracking_guidance
+    test_recovery_safety
+    test_planner_avoidance
+    test_swarm
+)
     add_executable(${t} tests/${t}.c)
-    target_link_libraries(${t} PRIVATE nav_core)
+    target_link_libraries(${t} PRIVATE nav_core nav_sim)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
@@ -78,6 +102,22 @@ endforeach()
 add_test(NAME mission_closed_loop COMMAND mission_sim)
 set_tests_properties(mission_closed_loop PROPERTIES
     PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+
+foreach(scenario
+    moving-target
+    target-loss
+    impact-degraded
+    impact-lost
+    home-initial-hidden
+    home-loss
+    local-obstacle
+    forced-return
+    two-agent-conflict
+)
+    add_test(NAME scenario_${scenario} COMMAND mission_sim --scenario ${scenario})
+    set_tests_properties(scenario_${scenario} PROPERTIES
+        PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+endforeach()
 
 # 蒙特卡洛回归：多种子（偏置/漂移/噪声不同）+ 最坏情况 + 理想对照
 foreach(seed 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)

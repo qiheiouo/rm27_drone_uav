@@ -113,7 +113,6 @@ void vf_update(VisionFrontend *vf, const FlowFrame *frame,
 
     float xs[VF_MAX_FEATURES], ys[VF_MAX_FEATURES];
     float dus[VF_MAX_FEATURES], dvs[VF_MAX_FEATURES];
-    uint16_t m_id[VF_MAX_FEATURES];
     float    m_u[VF_MAX_FEATURES], m_v[VF_MAX_FEATURES];
     uint8_t n = 0u;
     uint8_t i, j;
@@ -131,7 +130,6 @@ void vf_update(VisionFrontend *vf, const FlowFrame *frame,
         for (i = 0u; i < frame->count && i < VF_MAX_FEATURES; i++) {
             for (j = 0u; j < vf->prev_count; j++) {
                 if (vf->prev_id[j] == frame->feats[i].id && n < VF_MAX_FEATURES) {
-                    m_id[n] = frame->feats[i].id;
                     m_u[n]  = frame->feats[i].u;
                     m_v[n]  = frame->feats[i].v;
                     dus[n]  = frame->feats[i].u - vf->prev_u[j];

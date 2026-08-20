@@ -35,8 +35,18 @@ static inline Vec3f vec3_zero(void) { return vec3(0.0f, 0.0f, 0.0f); }
 static inline Vec3f vec3_add(Vec3f a, Vec3f b) { return vec3(a.x + b.x, a.y + b.y, a.z + b.z); }
 static inline Vec3f vec3_sub(Vec3f a, Vec3f b) { return vec3(a.x - b.x, a.y - b.y, a.z - b.z); }
 static inline Vec3f vec3_scale(Vec3f a, float s) { return vec3(a.x * s, a.y * s, a.z * s); }
+static inline Vec3f vec3_lerp(Vec3f a, Vec3f b, float t)
+{
+    return vec3_add(a, vec3_scale(vec3_sub(b, a), t));
+}
 
 static inline float vec3_dot(Vec3f a, Vec3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static inline Vec3f vec3_cross(Vec3f a, Vec3f b)
+{
+    return vec3(a.y * b.z - a.z * b.y,
+                a.z * b.x - a.x * b.z,
+                a.x * b.y - a.y * b.x);
+}
 static inline float vec3_norm(Vec3f a) { return sqrtf(vec3_dot(a, a)); }
 static inline float vec3_norm_xy(Vec3f a) { return sqrtf(a.x * a.x + a.y * a.y); }
 static inline float vec3_dist(Vec3f a, Vec3f b) { return vec3_norm(vec3_sub(a, b)); }
@@ -45,6 +55,18 @@ static inline float vec3_dist_xy(Vec3f a, Vec3f b) { return vec3_norm_xy(vec3_su
 static inline float clampf(float v, float lo, float hi)
 {
     return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static inline uint8_t nav_isfinite(float v) { return isfinite(v) ? 1u : 0u; }
+static inline uint8_t vec3_is_finite(Vec3f v)
+{
+    return (nav_isfinite(v.x) && nav_isfinite(v.y) && nav_isfinite(v.z)) ? 1u : 0u;
+}
+
+static inline Vec3f vec3_normalize_or(Vec3f v, Vec3f fallback)
+{
+    float n = vec3_norm(v);
+    return (n > 1e-6f && nav_isfinite(n)) ? vec3_scale(v, 1.0f / n) : fallback;
 }
 
 static inline float wrap_pi(float a)

@@ -1,86 +1,86 @@
-/*
- * state_estimator.h - 状态估计（第二阶段：IMU 惯导 + 视觉里程计融合）
- *
- * 结构：
- *   IMU(陀螺/加速度计) → INS 预测（姿态积分 + 比力积分）
- *   Mahony 姿态修正（加速度计倾斜校正 + 陀螺偏置学习）
- *   VO(OdomSample) → 互补校正（位置/速度/偏航）
- *   VO 有效性/撞击事件 → 健康状态机
- *
- * 健康状态（Plan 第 6 节，不假设 VIO 永远连续）：
- *   TRACKING / DEGRADED / LOST / RECOVERING / RELOCALIZED
- *
- * EST_MODE_TRUTH 保留第一阶段的透传模式（单元测试/对照实验用）。
- */
+/* Lightweight visual-inertial state framework with explicit health states. */
 #ifndef STATE_ESTIMATOR_H
 #define STATE_ESTIMATOR_H
 
 #include <stdint.h>
 #include "nav_math.h"
-#include "impact_detector.h"   /* ImuSample */
+#include "impact_detector.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum {
-    EST_TRACKING = 0,   /* 正常跟踪（VO 有效） */
-    EST_DEGRADED,       /* 退化：VO 短暂失效/撞击后，纯 IMU 推算 */
-    EST_LOST,           /* 丢失：输出冻结，禁止大范围机动 */
-    EST_RECOVERING,     /* 恢复中：VO 重新有效，收敛中 */
-    EST_RELOCALIZED     /* 已重定位（一个 tick 后回到 TRACKING） */
+    EST_INIT = 0,
+    EST_IMU_ONLY,
+    EST_VISUAL_AIDED,
+    EST_TRACKING,
+    EST_DEGRADED,
+    EST_LOST,
+    EST_RECOVERING,
+    EST_RELOCALIZED
 } EstStatus;
 
 typedef enum {
-    EST_MODE_TRUTH = 0, /* 透传里程计（第一阶段行为/对照） */
-    EST_MODE_INS        /* IMU 预测 + VO 校正 */
+    EST_MODE_TRUTH = 0,
+    EST_MODE_INS
 } EstimatorMode;
 
-/* 导航状态输出 */
+typedef enum {
+    NAV_VALID_INVALID = 0,
+    NAV_VALID_DEGRADED,
+    NAV_VALID_VALID
+} NavValidity;
+
 typedef struct {
-    Vec3f    pos;          /* (m) */
-    Vec3f    vel;          /* (m/s) */
-    float    yaw;          /* (rad) */
-    float    yaw_rate;     /* (rad/s) */
-    Quatf    att;          /* 姿态（机体→导航系），相机重建等使用 */
-    EstStatus status;
+    Vec3f    pos;
+    Vec3f    vel;
+    Quatf    att;
+    Vec3f    angular_velocity;
+    Vec3f    linear_acceleration;
+    float    yaw;
+    float    yaw_rate;
     uint32_t timestamp_ms;
+    NavValidity validity;
+    float    quality;
+    EstimatorMode mode;
+    EstStatus status;
 } NavState;
 
-/* 视觉里程计输入（仿真 VO / 未来 VIO 输出） */
 typedef struct {
     Vec3f    pos;
     Vec3f    vel;
     float    yaw;
     float    yaw_rate;
-    Quatf    att;          /* VO 姿态输出（真实 VIO 均提供姿态） */
-    uint8_t  valid;        /* 0 = 本帧视觉无效（特征骤减/模糊） */
+    Quatf    att;
+    uint8_t  valid;
     uint32_t timestamp_ms;
 } OdomSample;
 
 typedef struct {
+    uint8_t valid;
+    Vec3f position;
+    Vec3f velocity;
+    float position_gain;
+    float velocity_gain;
+    float max_position_innovation_m;
+    float max_velocity_innovation_mps;
+    uint32_t timestamp_ms;
+} VisualCorrection;
+
+typedef struct {
     EstimatorMode mode;
-    /* 健康机 */
-    float  vo_degraded_after_s;  /* VO 失效多久 → DEGRADED */
-    float  vo_lost_after_s;      /* VO 失效多久 → LOST */
-    float  recovering_hold_s;    /* VO 恢复后收敛时间 → RELOCALIZED */
-    float  lost_timeout_s;       /* LOST 最长盲等（之后尝试纯 IMU 恢复） */
-    float  impact_blind_s;       /* 撞击后拒绝视觉输入的时长（视觉冻结） */
-    uint8_t lost_on_impact;      /* 1 = 撞击直接 LOST（最坏情况演练） */
-    /* Mahony 姿态修正 */
-    float  kp_tilt;              /* 加速度计倾斜校正增益 */
-    float  ki_gyro_bias;         /* 陀螺偏置学习增益 */
-    /* VO 互补校正增益 (1/s)。
-     * kp_vo_yaw = 0：光流 VO 的偏航与 INS 偏航同源（同一陀螺积分），
-     * 校正只会把撞击/冻结期间 vf 偏航的瞬时错误灌回估计器（正反馈）。
-     * 偏航漂移由重定位时的 vf_set_pose 对齐来兜底。 */
+    float  vo_degraded_after_s;
+    float  vo_lost_after_s;
+    float  recovering_hold_s;
+    float  lost_timeout_s;
+    float  impact_blind_s;
+    uint8_t lost_on_impact;
+    float  kp_tilt;
+    float  ki_gyro_bias;
     float  kp_vo_pos;
     float  kp_vo_vel;
     float  kp_vo_yaw;
-    /* ToF 测距高度融合增益 (1/s)：光流 Vz 通道可观性弱，
-     * 高度由 rangefinder 直接锚定（地面 z=0 假设）。
-     * kp_tof 为位置通道，kp_tof_vel 为速度通道（二阶互补滤波，
-     * 速度增益需显著大于位置增益以抑制加速度计 z 偏置积分） */
     float  kp_tof;
     float  kp_tof_vel;
 } EstimatorConfig;
@@ -88,29 +88,30 @@ typedef struct {
 typedef struct {
     EstimatorConfig cfg;
     NavState  out;
-    float     timer;             /* 当前健康状态持续时间 */
-    float     vo_invalid_time;   /* VO 连续失效时长 */
-    float     blind_time;        /* 撞击后视觉冻结剩余时间 */
-    NavState  last_valid;        /* LOST 时冻结的输出 */
-    /* INS 内部状态 */
+    float     timer;
+    float     vo_invalid_time;
+    float     blind_time;
+    NavState  last_valid;
     Vec3f     ins_pos;
     Vec3f     ins_vel;
     Quatf     ins_att;
     Vec3f     gyro_bias;
     Vec3f     accel_bias;
+    uint16_t  good_visual_frames;
+    uint16_t  rejected_measurements;
+    float     max_position_innovation_m;
+    float     max_velocity_innovation_mps;
 } StateEstimator;
 
 void estimator_init(StateEstimator *est, const EstimatorConfig *cfg);
-/* 撞击事件通知（由 impact detector 触发） */
 void estimator_notify_impact(StateEstimator *est);
-/* 外部绝对参考注入（基座 marker 重建 → 第三层定位） */
 void estimator_notify_relocalized(StateEstimator *est, const NavState *absolute_ref);
-/* 每 tick：imu 始终有效；vo->valid 表示视觉是否可用；
- * tof_height 为 ToF 离地高度（m），<0 表示本帧无效 */
+uint8_t estimator_apply_visual_correction(StateEstimator *est,
+                                          const VisualCorrection *correction,
+                                          float dt);
 void estimator_update(StateEstimator *est, const ImuSample *imu,
                       const OdomSample *vo, float tof_height, float dt);
-
-const char *est_status_name(EstStatus s);
+const char *est_status_name(EstStatus status);
 
 #ifdef __cplusplus
 }

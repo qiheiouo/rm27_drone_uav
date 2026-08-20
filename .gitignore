@@ -1,5 +1,9 @@
-build/
+build*/
 out/
 *.o
 *.obj
 *.exe
+*.a
+*.log
+.vscode/
+.idea/

@@ -1,77 +1,80 @@
-/*
- * nav_tasks.h - STM32 固件任务装配（参考实现）
- *
- * NavApp 静态持有全部导航模块实例与配置，nav_app_step 为导航主循环
- * （建议 100~200 Hz，与 host 仿真 main.c 保持相同的模块调用顺序）。
- *
- * 低层姿态/角速度环不在本仓库范围（由既有固件或后续开发提供），
- * 本层只输出 CtrlOutput。
- */
+/* Fixed-memory STM32 navigation task adapter. */
 #ifndef NAV_TASKS_H
 #define NAV_TASKS_H
 
 #include <stdint.h>
 #include "state_estimator.h"
 #include "impact_detector.h"
+#include "impact_recovery.h"
 #include "safety_monitor.h"
+#include "obstacle_avoidance.h"
 #include "target_tracker.h"
 #include "home_detector.h"
 #include "vision_frontend.h"
 #include "mission_fsm.h"
 #include "pos_controller.h"
-#include "trajectory.h"
+#include "trajectory_planner.h"
 #include "camera.h"
-#include "guidance.h"      /* TerminalParams / HomeParams */
+#include "guidance.h"
+#include "collision_interface.h"
+#include "swarm_avoidance.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* 固件侧全部配置（对应仿真的 Scenario，但不含仿真专用字段） */
 typedef struct {
-    MissionConfig       mission;
-    EstimatorConfig     estimator;
+    MissionConfig mission;
+    EstimatorConfig estimator;
     ImpactDetectorConfig impact;
-    SafetyConfig        safety;
-    PosCtrlParams       ctrl;
-    TerminalParams      terminal;
-    HomeParams          home_guidance;
-    FlowConfig          flow;
-    CameraModel         cam_forward;
-    CameraModel         cam_down;
-    float               target_size_m;
-    float               marker_size_m;
-    float               recovery_damping;
-    Vec3f               home_pos;
-    WaypointQueue       outbound_route;
-    WaypointQueue       search_route;
+    ImpactFusionConfig impact_fusion;
+    ImpactRecoveryConfig recovery;
+    SafetyConfig safety;
+    ObstacleAvoidanceConfig obstacle_avoidance;
+    TrajectoryPlannerConfig planner;
+    CollisionConfig swarm_collision;
+    SwarmAvoidanceConfig swarm_avoidance;
+    PosCtrlParams ctrl;
+    TerminalParams terminal;
+    HomeParams home_guidance;
+    FlowConfig flow;
+    CameraModel cam_forward;
+    CameraModel cam_down;
+    float target_size_m;
+    float marker_size_m;
+    Vec3f home_pos;
+    WaypointQueue outbound_route;
+    WaypointQueue search_route;
+    uint8_t self_agent_id;
 } NavAppConfig;
 
 typedef struct {
-    NavAppConfig   cfg;
+    NavAppConfig cfg;
     StateEstimator estimator;
-    ImpactDetector impact_det;
-    TargetTracker  tracker;
-    HomeDetector   home_det;
-    SafetyMonitor  safety;
-    MissionFsm     fsm;
-    VisionFrontend vf;
-    Trajectory     traj;
-    float          traj_t;
-    uint8_t        traj_active;
-
-    MissionState   prev_state;
-    float          last_impact_t;
-    float          last_relocalize_t;
-    MissionOutput  mout;
+    ImpactDetector impact_detector;
+    ImpactRecovery recovery;
+    ImpactRecoveryOutput recovery_output;
+    TargetTracker target_tracker;
+    HomeDetector home_detector;
+    SafetyMonitor safety;
+    MissionFsm mission;
+    TerminalGuidance terminal;
+    VisionFrontend vision_frontend;
+    DynamicObstacleSet obstacles;
+    SwarmView swarm;
+    Trajectory trajectory;
+    TrajectoryPlanReport trajectory_report;
+    CtrlOutput previous_control;
+    MissionOutput mission_output;
+    float trajectory_time_s;
+    uint32_t last_relocalization_ms;
+    uint8_t trajectory_active;
+    uint8_t trajectory_valid;
 } NavApp;
 
 void nav_app_init(NavApp *app, const NavAppConfig *cfg);
 
-/*
- * 导航主循环一步（建议 100~200 Hz 周期调用）：
- * 读取板级传感器 → 估计 → 检测 → FSM → 制导 → 控制 → nav_fcu_send。
- */
+/* Call at 100--200 Hz. All expensive loops have compile-time bounds. */
 void nav_app_step(NavApp *app, float dt);
 
 #ifdef __cplusplus

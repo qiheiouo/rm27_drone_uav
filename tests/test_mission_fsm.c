@@ -16,20 +16,30 @@ static int failures = 0;
 
 static MissionInput make_input(const Scenario *sc)
 {
-    MissionInput in;
+    MissionInput in = {0};
     in.nav.pos = sc->home_pos;
     in.nav.vel = vec3_zero();
     in.nav.yaw = 0.0f;
     in.nav.yaw_rate = 0.0f;
+    in.nav.att = quat_identity();
+    in.nav.angular_velocity = vec3_zero();
+    in.nav.linear_acceleration = vec3_zero();
+    in.nav.validity = NAV_VALID_VALID;
+    in.nav.quality = 1.0f;
+    in.nav.mode = EST_MODE_INS;
     in.nav.status = EST_TRACKING;
     in.nav.timestamp_ms = 0u;
     in.target.visible = 0u;
+    in.target.status = TARGET_TRACK_LOST;
     in.target.rel_pos = vec3_zero();
     in.target.range = 1e9f;
     in.target.time_since_update = 1e9f;
+    in.target.confidence = 0.0f;
     in.home.visible = 0u;
+    in.home.confidence = 0.0f;
     in.home.rel_pos = vec3_zero();
     in.home.time_since_update = 1e9f;
+    in.home.relative_yaw = 0.0f;
     in.impact_detected = 0u;
     in.start_command = 1u;
     in.time_exceeded = 0u;
@@ -90,6 +100,8 @@ int main(void)
 
     /* SEARCH → TARGET_TRACK：目标持续可见 */
     in.target.visible = 1u;
+    in.target.status = TARGET_TRACK_TRACKING;
+    in.target.confidence = 1.0f;
     in.target.rel_pos = vec3(2.5f, 0.0f, 0.0f);
     in.target.range = 2.5f;
     run_ticks(&fsm, &in, &out, (int)(sc.mission.target_confirm_s / in.dt) + 2);
@@ -131,12 +143,18 @@ int main(void)
     in.home.rel_pos = vec3(0.0f, 0.0f, -1.0f);
     in.home.time_since_update = 0.0f;
     run_ticks(&fsm, &in, &out, 2);
+    CHECK(out.state == MS_HOMING);
+
+    in.nav.pos.z = sc.mission.dock_blind_land_alt_m - 0.01f;
+    run_ticks(&fsm, &in, &out, 4);
     CHECK(out.state == MS_DOCKING);
 
     /* DOCKING → DOCKED：对准且高度足够低 */
     in.nav.pos = vec3(sc.home_pos.x, sc.home_pos.y, sc.mission.dock_alt_m - 0.01f);
     in.home.rel_pos = vec3(0.01f, 0.01f, -0.05f);
-    run_ticks(&fsm, &in, &out, 2);
+    in.dock_contact = 1u;
+    in.wireless_charge_ready = 1u;
+    run_ticks(&fsm, &in, &out, 8);
     CHECK(out.state == MS_DOCKED);
     CHECK(out.mission_complete == 1u);
 
@@ -166,6 +184,8 @@ int main(void)
         CHECK(o2.state == MS_SEARCH);
 
         in2.target.visible = 1u;
+        in2.target.status = TARGET_TRACK_TRACKING;
+        in2.target.confidence = 1.0f;
         in2.target.range = 2.5f;
         run_ticks(&f2, &in2, &o2, (int)(sc.mission.target_confirm_s / in2.dt) + 2);
         CHECK(o2.state == MS_TARGET_TRACK);

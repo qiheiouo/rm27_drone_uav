@@ -1,9 +1,4 @@
-/*
- * scenario.h - 仿真场景与全部参数配置
- *
- * 已知场地假设（Plan 第 11 节）：arena 几何、目标大致区域、
- * 基座位置均为先验；第一版不做在线建图。
- */
+/* Host-only deterministic scenario and module configuration. */
 #ifndef SCENARIO_H
 #define SCENARIO_H
 
@@ -12,63 +7,91 @@
 #include "mission_fsm.h"
 #include "state_estimator.h"
 #include "impact_detector.h"
+#include "impact_recovery.h"
 #include "safety_monitor.h"
+#include "obstacle_avoidance.h"
+#include "trajectory_planner.h"
 #include "pos_controller.h"
 #include "guidance.h"
 #include "camera.h"
 #include "vision_frontend.h"
 #include "sim_dynamics.h"
+#include "collision_interface.h"
+#include "swarm_avoidance.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+typedef enum {
+    SCENARIO_NOMINAL = 0,
+    SCENARIO_MOVING_TARGET,
+    SCENARIO_TARGET_LOSS,
+    SCENARIO_IMPACT_DEGRADED,
+    SCENARIO_IMPACT_LOST,
+    SCENARIO_HOME_INITIAL_HIDDEN,
+    SCENARIO_HOME_LOSS,
+    SCENARIO_LOCAL_OBSTACLE,
+    SCENARIO_FORCED_RETURN,
+    SCENARIO_TWO_AGENT_CONFLICT
+} ScenarioKind;
+
 typedef struct {
-    /* 场景真值 */
+    ScenarioKind kind;
+    const char *name;
     Vec3f home_pos;
     Vec3f target_pos;
+    Vec3f target_velocity;
     WaypointQueue outbound_route;
     WaypointQueue search_route;
 
-    /* 模块配置 */
-    MissionConfig     mission;
-    EstimatorConfig   estimator;
+    MissionConfig mission;
+    EstimatorConfig estimator;
     ImpactDetectorConfig impact;
-    SafetyConfig      safety;
-    PosCtrlParams     ctrl;
-    SimParams         dynamics;
-    TerminalParams    terminal;
-    HomeParams        home_guidance;
-    float             recovery_damping;
+    ImpactFusionConfig impact_fusion;
+    ImpactRecoveryConfig recovery;
+    SafetyConfig safety;
+    PosCtrlParams ctrl;
+    SimParams dynamics;
+    TerminalParams terminal;
+    HomeParams home_guidance;
+    TrajectoryPlannerConfig planner;
+    ObstacleAvoidanceConfig obstacle_avoidance;
+    DynamicObstacleSet obstacles;
+    CollisionConfig swarm_collision;
+    SwarmAvoidanceConfig swarm_avoidance;
 
-    /* 相机（第二阶段：像素级检测链路） */
-    CameraModel       cam_forward;   /* 前视：目标检测 */
-    CameraModel       cam_down;      /* 下视：基座 marker + 光流 */
-    float             target_size_m; /* 目标真实尺寸（检测算法已知） */
-    float             marker_size_m; /* 基座 marker 真实尺寸 */
+    CameraModel cam_forward;
+    CameraModel cam_down;
+    float target_size_m;
+    float marker_size_m;
+    uint8_t use_flow_vo;
+    FlowConfig flow;
+    float feature_area_m;
+    uint16_t feature_count;
 
-    /* VO 前端（第三阶段：光流里程计） */
-    uint8_t           use_flow_vo;   /* 1 = 光流前端；0 = 仿真 VO（对照） */
-    FlowConfig        flow;
-    float             feature_area_m;    /* 地面特征点散布范围 */
-    uint16_t          feature_count;     /* 地面特征点数量 */
-
-    /* 仿真控制 */
     float dt;
     float sim_max_time_s;
-    float impact_range_m;    /* TERMINAL 中距目标小于该值时发生接触 */
-    float vision_freeze_s;   /* 撞击后视觉冻结时长 */
+    float impact_range_m;
+    float vision_freeze_s;
     uint32_t seed;
-
-    /* 撞击强度（--hard-impact 覆盖为剧烈翻倾） */
     Vec3f impact_delta_v;
     float impact_delta_yaw;
     float impact_delta_pitch;
     float impact_delta_roll;
+
+    float target_hidden_start_s;
+    float target_hidden_end_s;
+    float home_hidden_until_s;
+    float home_loss_start_s;
+    float home_loss_end_s;
+    uint8_t other_agent_enabled;
+    AgentState other_agent;
 } Scenario;
 
-/* 默认场景：基座在原点，搜索区约 4 m 外，目标在搜索区内 */
-void scenario_default(Scenario *sc);
+void scenario_default(Scenario *scenario);
+int scenario_apply_kind(Scenario *scenario, const char *name);
+const char *scenario_kind_name(ScenarioKind kind);
 
 #ifdef __cplusplus
 }
