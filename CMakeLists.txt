@@ -10,6 +10,7 @@ endif()
 
 # MCU 兼容核心 + host 仿真。所有代码 C99、静态内存、无动态分配。
 add_library(nav_core STATIC
+    core/diagnostics/nav_event_log.c
     core/runtime/nav_runtime.c
     core/planner/waypoint.c
     core/planner/trajectory.c
@@ -39,6 +40,7 @@ add_library(nav_sim STATIC
 )
 
 target_include_directories(nav_core PUBLIC
+    core/diagnostics
     core/runtime
     core/math
     core/filters
@@ -76,6 +78,9 @@ endif()
 add_executable(mission_sim platform/host/main.c)
 target_link_libraries(mission_sim PRIVATE nav_sim)
 
+add_executable(nav_replay platform/host/replay.c)
+target_link_libraries(nav_replay PRIVATE nav_core)
+
 # STM32 移植层骨架：host 编译检查（板级函数仅声明，静态库无需链接）
 add_library(nav_stm32_port STATIC platform/stm32/nav_tasks.c)
 target_link_libraries(nav_stm32_port PUBLIC nav_core)
@@ -95,6 +100,7 @@ foreach(t
     test_planner_avoidance
     test_swarm
     test_nav_runtime
+    test_diagnostics
 )
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core nav_sim)
@@ -105,6 +111,12 @@ endforeach()
 add_test(NAME mission_closed_loop COMMAND mission_sim)
 set_tests_properties(mission_closed_loop PROPERTIES
     PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+
+add_test(NAME replay_determinism
+    COMMAND nav_replay --verify
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/replay_stationary.csv)
+set_tests_properties(replay_determinism PROPERTIES
+    PASS_REGULAR_EXPRESSION "REPLAY_SUCCESS")
 
 foreach(scenario
     moving-target

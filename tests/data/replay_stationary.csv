@@ -1,0 +1,7 @@
+# RM_Drone_Nav replay schema v1
+# timestamp_ms,ax,ay,az,gx,gy,gz,tof,odom_valid,px,py,pz,vx,vy,vz,yaw,yaw_rate,target_visible,target_u,target_v,target_size,home_visible,home_u,home_v,home_size,start,return,emergency,dock,charging,wireless_ready
+0,0,0,9.81,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+10,0,0,9.81,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+20,0,0,9.81,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+30,0,0,9.81,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+40,0,0,9.81,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0

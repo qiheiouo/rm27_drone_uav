@@ -19,6 +19,7 @@ void scenario_default(Scenario *scenario)
     scenario->impact_fusion = runtime_cfg.impact_fusion;
     scenario->recovery = runtime_cfg.recovery;
     scenario->safety = runtime_cfg.safety;
+    scenario->health = runtime_cfg.health;
     scenario->ctrl = runtime_cfg.ctrl;
     scenario->terminal = runtime_cfg.terminal;
     scenario->home_guidance = runtime_cfg.home_guidance;
@@ -69,6 +70,7 @@ void scenario_runtime_config(const Scenario *scenario, NavRuntimeConfig *cfg)
     cfg->impact_fusion = scenario->impact_fusion;
     cfg->recovery = scenario->recovery;
     cfg->safety = scenario->safety;
+    cfg->health = scenario->health;
     cfg->obstacle_avoidance = scenario->obstacle_avoidance;
     cfg->planner = scenario->planner;
     cfg->swarm_collision = scenario->swarm_collision;

@@ -18,6 +18,7 @@
 | 动态障碍 | 最多 8 个局部/动态障碍，最近接预测、横向避让和紧急爬升输出 |
 | 多机扩展 | 最多 4 个他机状态、带时间戳未来轨迹消息、超时处理、未来冲突检测，以及按 `agent_id` 确定性让行；默认可关闭 |
 | STM32 对接 | 主机与 STM32 共用 `NavRuntime` 算法调用链，板级只负责输入输出适配；无堆分配、固定容量数组 |
+| 诊断与回放 | 输入过期/重复/乱序检查、连续周期 watchdog、64 条固定内存事件环，以及确定性 CSV 回放工具 |
 
 算法选择参考了 EGO-Planner、EGO-Swarm、分布式群体轨迹优化、bearing 相对定位、《Swarm of micro flying robots in the wild》及 GCOPTER。项目只提取固定维度轨迹、约束后检查、轨迹时标缩放、带时效的未来状态共享和相对观测恢复等思想；未把 ESDF、ROS、完整 VIO、L-BFGS 或一般非线性优化器直接搬到 MCU。
 
@@ -43,14 +44,17 @@ ctest --test-dir build --output-on-failure
 .\build\mission_sim.exe --scenario two-agent-conflict
 .\build\mission_sim.exe --lost-on-impact --seed 17
 .\build\mission_sim.exe --hard-impact --seed 23
+.\build\nav_replay.exe tests\data\replay_stationary.csv
+.\build\nav_replay.exe --verify tests\data\replay_stationary.csv
 ```
 
 退出码：`0` 为任务完成并停靠；`2` 为紧急降落；`3` 为仿真超时；`4` 表示场景虽然到达终点，但声明的压力分支没有真正触发；`5` 表示共享运行时拒绝了无效输入。
 
-当前 CTest 共 54 项：
+当前 CTest 共 56 项：
 
-- 12 个模块级测试（含共享运行时配置、失效轨迹与蜂群安全链路）；
+- 13 个模块级测试（含共享运行时、输入时效、watchdog、事件环、失效轨迹与蜂群安全链路）；
 - 1 个默认闭环测试；
+- 1 个确定性日志回放测试；
 - 9 个具名压力场景；
 - 32 个随机种子、撞击后 LOST、剧烈撞击及真值对照回归。
 
@@ -90,4 +94,4 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 - 尚未在目标 STM32、传感器和机体上测量 RAM、最坏执行时间与控制稳定裕量。
 - 30 秒预算是仿真安全约束；实机必须根据电池和比赛规则留出更大的返航裕量。
 
-进一步说明见 [架构文档](docs/architecture.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
+进一步说明见 [架构文档](docs/architecture.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。

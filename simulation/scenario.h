@@ -52,6 +52,7 @@ typedef struct {
     ImpactFusionConfig impact_fusion;
     ImpactRecoveryConfig recovery;
     SafetyConfig safety;
+    NavRuntimeHealthConfig health;
     PosCtrlParams ctrl;
     SimParams dynamics;
     TerminalParams terminal;

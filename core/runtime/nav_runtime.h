@@ -19,6 +19,7 @@
 #include "guidance.h"
 #include "collision_interface.h"
 #include "swarm_avoidance.h"
+#include "nav_event_log.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,8 +48,43 @@ enum {
     NAV_EVENT_OBSTACLE_RISK = 1u << 2,
     NAV_EVENT_SWARM_CONFLICT = 1u << 3,
     NAV_EVENT_TRAJECTORY_DETOUR = 1u << 4,
-    NAV_EVENT_TRAJECTORY_INVALID = 1u << 5
+    NAV_EVENT_TRAJECTORY_INVALID = 1u << 5,
+    NAV_EVENT_INPUT_REJECTED = 1u << 6,
+    NAV_EVENT_WATCHDOG_OVERRUN = 1u << 7,
+    NAV_EVENT_WATCHDOG_TRIPPED = 1u << 8
 };
+
+enum {
+    NAV_INPUT_SOURCE_IMU = 1u << 0,
+    NAV_INPUT_SOURCE_FLOW = 1u << 1,
+    NAV_INPUT_SOURCE_ODOMETRY = 1u << 2,
+    NAV_INPUT_SOURCE_TARGET = 1u << 3,
+    NAV_INPUT_SOURCE_HOME = 1u << 4
+};
+
+#define NAV_TIMESTAMPED_INPUT_COUNT 5u
+
+typedef struct {
+    uint32_t imu_max_age_ms;
+    uint32_t flow_max_age_ms;
+    uint32_t odometry_max_age_ms;
+    uint32_t vision_max_age_ms;
+    uint32_t future_tolerance_ms;
+    uint32_t max_cycle_gap_ms;
+    uint8_t watchdog_trip_after_overruns;
+} NavRuntimeHealthConfig;
+
+typedef struct {
+    uint32_t stale_source_mask;
+    uint32_t duplicate_source_mask;
+    uint32_t out_of_order_source_mask;
+    uint32_t nonfinite_source_mask;
+    uint32_t invalid_source_mask;
+    uint32_t cycle_gap_ms;
+    uint8_t consecutive_overruns;
+    uint8_t watchdog_tripped;
+    uint8_t required_input_valid;
+} NavRuntimeHealth;
 
 typedef struct {
     MissionConfig mission;
@@ -75,6 +111,7 @@ typedef struct {
     float home_yaw_rad;
     float relocalization_cooldown_s;
     float relocalization_min_correction_m;
+    NavRuntimeHealthConfig health;
     Vec3f home_pos;
     WaypointQueue outbound_route;
     WaypointQueue search_route;
@@ -116,6 +153,7 @@ typedef struct {
     GuidanceOutput guidance;
     CtrlOutput control;
     AgentState swarm_self;
+    NavRuntimeHealth health;
     uint32_t event_flags;
     uint8_t recovery_active;
     uint8_t trajectory_active;
@@ -143,9 +181,16 @@ typedef struct {
     CtrlOutput previous_control;
     MissionOutput mission_output;
     NavRuntimeOutput output;
+    NavEventLog event_log;
     float trajectory_time_s;
     uint32_t last_relocalization_ms;
+    uint32_t last_update_timestamp_ms;
+    uint32_t last_source_timestamp_ms[NAV_TIMESTAMPED_INPUT_COUNT];
+    uint32_t source_seen_mask;
     uint32_t config_errors;
+    uint8_t update_timestamp_seen;
+    uint8_t watchdog_overruns;
+    uint8_t watchdog_tripped;
     uint8_t trajectory_active;
     uint8_t trajectory_valid;
     uint8_t relocalization_seen;
@@ -161,6 +206,7 @@ uint32_t nav_runtime_init(NavRuntime *runtime, const NavRuntimeConfig *cfg);
 
 /* Returns 1 after a valid update, or 0 when initialization/input is invalid. */
 uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input);
+const NavEventLog *nav_runtime_event_log(const NavRuntime *runtime);
 
 #ifdef __cplusplus
 }

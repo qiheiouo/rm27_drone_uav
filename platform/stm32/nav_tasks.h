@@ -14,6 +14,7 @@ typedef NavRuntimeConfig NavAppConfig;
 typedef struct {
     NavRuntime runtime;
     uint32_t config_errors;
+    uint32_t next_log_sequence;
 } NavApp;
 
 /* Returns the configuration error mask; zero means initialization succeeded. */
