@@ -18,6 +18,7 @@
 #include "sim_dynamics.h"
 #include "collision_interface.h"
 #include "swarm_avoidance.h"
+#include "nav_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +91,7 @@ typedef struct {
 } Scenario;
 
 void scenario_default(Scenario *scenario);
+void scenario_runtime_config(const Scenario *scenario, NavRuntimeConfig *cfg);
 int scenario_apply_kind(Scenario *scenario, const char *name);
 const char *scenario_kind_name(ScenarioKind kind);
 

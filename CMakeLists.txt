@@ -10,6 +10,7 @@ endif()
 
 # MCU 兼容核心 + host 仿真。所有代码 C99、静态内存、无动态分配。
 add_library(nav_core STATIC
+    core/runtime/nav_runtime.c
     core/planner/waypoint.c
     core/planner/trajectory.c
     core/planner/trajectory_planner.c
@@ -38,6 +39,7 @@ add_library(nav_sim STATIC
 )
 
 target_include_directories(nav_core PUBLIC
+    core/runtime
     core/math
     core/filters
     core/planner
@@ -92,6 +94,7 @@ foreach(t
     test_recovery_safety
     test_planner_avoidance
     test_swarm
+    test_nav_runtime
 )
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core nav_sim)

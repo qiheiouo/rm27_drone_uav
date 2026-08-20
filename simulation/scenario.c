@@ -3,140 +3,41 @@
 
 void scenario_default(Scenario *scenario)
 {
+    NavRuntimeConfig runtime_cfg;
+
+    nav_runtime_config_default(&runtime_cfg);
     scenario->kind = SCENARIO_NOMINAL;
     scenario->name = "nominal";
-    scenario->home_pos = vec3(0.0f, 0.0f, 0.0f);
+    scenario->home_pos = runtime_cfg.home_pos;
     scenario->target_pos = vec3(4.0f, 2.0f, 1.0f);
     scenario->target_velocity = vec3_zero();
+    scenario->outbound_route = runtime_cfg.outbound_route;
+    scenario->search_route = runtime_cfg.search_route;
+    scenario->mission = runtime_cfg.mission;
+    scenario->estimator = runtime_cfg.estimator;
+    scenario->impact = runtime_cfg.impact;
+    scenario->impact_fusion = runtime_cfg.impact_fusion;
+    scenario->recovery = runtime_cfg.recovery;
+    scenario->safety = runtime_cfg.safety;
+    scenario->ctrl = runtime_cfg.ctrl;
+    scenario->terminal = runtime_cfg.terminal;
+    scenario->home_guidance = runtime_cfg.home_guidance;
+    scenario->planner = runtime_cfg.planner;
+    scenario->obstacle_avoidance = runtime_cfg.obstacle_avoidance;
+    scenario->swarm_collision = runtime_cfg.swarm_collision;
+    scenario->swarm_avoidance = runtime_cfg.swarm_avoidance;
+    scenario->cam_forward = runtime_cfg.cam_forward;
+    scenario->cam_down = runtime_cfg.cam_down;
+    scenario->target_size_m = runtime_cfg.target_size_m;
+    scenario->marker_size_m = runtime_cfg.marker_size_m;
+    scenario->flow = runtime_cfg.flow;
 
-    wq_init(&scenario->outbound_route);
-    wq_push(&scenario->outbound_route, vec3(2.0f, 0.0f, 1.2f), 1.8f);
-    wq_push(&scenario->outbound_route, vec3(3.5f, 0.5f, 1.2f), 1.8f);
-    wq_init(&scenario->search_route);
-    wq_push(&scenario->search_route, vec3(3.5f, 1.5f, 1.2f), 1.2f);
-    wq_push(&scenario->search_route, vec3(4.5f, 1.5f, 1.2f), 1.2f);
-    wq_push(&scenario->search_route, vec3(4.5f, 2.5f, 1.2f), 1.2f);
-    wq_push(&scenario->search_route, vec3(3.5f, 2.5f, 1.2f), 1.2f);
-
-    scenario->mission.takeoff_alt_m = 1.2f;
-    scenario->mission.waypoint_tol_m = 0.15f;
-    scenario->mission.cruise_speed_mps = 1.8f;
-    scenario->mission.search_yaw_rate_rps = 1.2f;
-    scenario->mission.target_confirm_s = 0.3f;
-    scenario->mission.target_acquire_timeout_s = 0.6f;
-    scenario->mission.terminal_range_m = 1.5f;
-    scenario->mission.target_lost_timeout_s = 1.0f;
-    scenario->mission.recovery_hold_s = 1.2f;
-    scenario->mission.recovery_tilt_ok_rad = 0.30f;
-    scenario->mission.breakaway_height_m = 0.5f;
-    scenario->mission.home_region_tol_m = 0.4f;
-    scenario->mission.home_approach_radius_m = 1.5f;
-    scenario->mission.home_search_alt_m = 0.8f;
-    scenario->mission.homing_fine_radius_m = 0.30f;
-    scenario->mission.homing_yaw_tol_rad = 0.30f;
-    scenario->mission.dock_alt_m = 0.08f;
-    scenario->mission.dock_lateral_tol_m = 0.08f;
-    scenario->mission.dock_capture_tol_m = 0.15f;
-    scenario->mission.dock_capture_max_alt_m = 0.25f;
-    scenario->mission.dock_land_vel_max = 0.10f;
-    scenario->mission.dock_blind_land_alt_m = 0.35f;
-    scenario->mission.home_lost_timeout_s = 0.5f;
-    scenario->mission.docking_timeout_s = 8.0f;
-    scenario->mission.dock_contact_confirm_s = 0.15f;
-    scenario->mission.estimator_lost_timeout_s = 3.0f;
-    scenario->mission.self_check_s = 0.3f;
-    scenario->mission.docked_launch_delay_s = 0.5f;
-
-    scenario->estimator.mode = EST_MODE_INS;
-    scenario->estimator.vo_degraded_after_s = 0.6f;
-    scenario->estimator.vo_lost_after_s = 2.0f;
-    scenario->estimator.recovering_hold_s = 0.5f;
-    scenario->estimator.lost_timeout_s = 1.5f;
-    scenario->estimator.impact_blind_s = 0.4f;
-    scenario->estimator.lost_on_impact = 0u;
-    scenario->estimator.kp_tilt = 2.0f;
-    scenario->estimator.ki_gyro_bias = 0.05f;
-    scenario->estimator.kp_vo_pos = 2.0f;
-    scenario->estimator.kp_vo_vel = 3.0f;
-    scenario->estimator.kp_vo_yaw = 0.0f;
-    scenario->estimator.kp_tof = 2.0f;
-    scenario->estimator.kp_tof_vel = 8.0f;
-
-    scenario->impact.accel_spike_threshold = 12.0f;
-    scenario->impact.gyro_spike_threshold = 12.0f;
-    scenario->impact.confirm_samples = 1u;
-    impact_detector_default_fusion_config(&scenario->impact_fusion);
-    impact_recovery_default_config(&scenario->recovery);
-
-    scenario->safety.max_mission_time_s = 30.0f;
-    scenario->safety.soft_return_deadline_s = 24.0f;
-    scenario->safety.hard_return_deadline_s = 30.0f;
-    scenario->safety.geofence_radius_m = 12.0f;
-    scenario->safety.geofence_min_alt_m = -0.20f;
-    scenario->safety.geofence_max_alt_m = 3.0f;
-    scenario->safety.min_estimator_quality = 0.20f;
-    scenario->safety.controller_saturation_timeout_s = 2.5f;
-    scenario->safety.collision_critical_timeout_s = 0.75f;
-    scenario->safety.trajectory_invalid_timeout_s = 0.25f;
-
-    scenario->ctrl.kp_pos = 2.0f;
-    scenario->ctrl.kp_vel = 3.0f;
-    scenario->ctrl.max_vel = 2.0f;
-    scenario->ctrl.max_accel = 6.0f;
-    scenario->ctrl.kp_yaw = 3.0f;
-    scenario->ctrl.max_yaw_rate = 2.0f;
     scenario->dynamics.drag = 0.5f;
     scenario->dynamics.max_speed = 2.5f;
     scenario->dynamics.max_yaw_rate = 3.0f;
     scenario->dynamics.max_att_rate = 10.0f;
-
-    scenario->terminal.approach_speed = 1.2f;
-    scenario->terminal.kp = 1.5f;
-    scenario->terminal.min_closing_speed = 0.2f;
-    scenario->terminal.closing_range_m = 2.4f;
-    scenario->terminal.final_align_range_m = 1.0f;
-    scenario->terminal.contact_range_m = 0.35f;
-    scenario->terminal.closing_speed_mps = 0.9f;
-    scenario->terminal.final_speed_mps = 0.55f;
-    scenario->terminal.contact_speed_mps = 0.35f;
-    scenario->terminal.kp_vertical = 1.2f;
-    scenario->terminal.max_vertical_speed_mps = 0.6f;
-    scenario->terminal.max_accel_mps2 = 3.0f;
-    scenario->terminal.yaw_align_tolerance_rad = 0.35f;
-    scenario->terminal.min_confidence = 0.15f;
-    scenario->terminal.loss_grace_s = 0.35f;
-    scenario->terminal.reacquire_timeout_s = 1.0f;
-
-    scenario->home_guidance.search_alt = 0.8f;
-    scenario->home_guidance.descend_speed = 0.45f;
-    scenario->home_guidance.kp_lateral = 1.0f;
-    scenario->home_guidance.max_lateral_speed = 0.4f;
-    scenario->home_guidance.lateral_tol = 0.10f;
-    scenario->home_guidance.spiral_rate = 0.25f;
-    scenario->home_guidance.spiral_max_radius = 1.5f;
-    scenario->home_guidance.spiral_omega = 2.0f;
-    scenario->home_guidance.blind_land_alt = 0.35f;
-    scenario->home_guidance.blind_land_timeout = 1.0f;
-    scenario->home_guidance.kp_yaw = 0.8f;
-    scenario->home_guidance.yaw_tolerance_rad = 0.30f;
-
-    trajectory_planner_default_config(&scenario->planner);
-    obstacle_avoidance_default_config(&scenario->obstacle_avoidance);
     obstacle_set_init(&scenario->obstacles);
-    collision_init(&scenario->swarm_collision, 0.60f);
-    swarm_avoidance_default_config(&scenario->swarm_avoidance);
-
-    camera_init(&scenario->cam_forward, 180.0f, 180.0f, 160.0f, 120.0f,
-                320.0f, 240.0f, CAM_MOUNT_FORWARD);
-    camera_init(&scenario->cam_down, 180.0f, 180.0f, 160.0f, 120.0f,
-                320.0f, 240.0f, CAM_MOUNT_DOWN);
-    scenario->target_size_m = 0.30f;
-    scenario->marker_size_m = 0.25f;
     scenario->use_flow_vo = 1u;
-    scenario->flow.min_height = 0.05f;
-    scenario->flow.max_height = 5.0f;
-    scenario->flow.min_features = 4u;
-    scenario->flow.outlier_residual_px = 3.0f;
     scenario->feature_area_m = 14.0f;
     scenario->feature_count = 4000u;
 
@@ -157,6 +58,33 @@ void scenario_default(Scenario *scenario)
     scenario->home_loss_end_s = -1.0f;
     scenario->other_agent_enabled = 0u;
     agent_state_clear(&scenario->other_agent);
+}
+
+void scenario_runtime_config(const Scenario *scenario, NavRuntimeConfig *cfg)
+{
+    nav_runtime_config_default(cfg);
+    cfg->mission = scenario->mission;
+    cfg->estimator = scenario->estimator;
+    cfg->impact = scenario->impact;
+    cfg->impact_fusion = scenario->impact_fusion;
+    cfg->recovery = scenario->recovery;
+    cfg->safety = scenario->safety;
+    cfg->obstacle_avoidance = scenario->obstacle_avoidance;
+    cfg->planner = scenario->planner;
+    cfg->swarm_collision = scenario->swarm_collision;
+    cfg->swarm_avoidance = scenario->swarm_avoidance;
+    cfg->ctrl = scenario->ctrl;
+    cfg->terminal = scenario->terminal;
+    cfg->home_guidance = scenario->home_guidance;
+    cfg->flow = scenario->flow;
+    cfg->cam_forward = scenario->cam_forward;
+    cfg->cam_down = scenario->cam_down;
+    cfg->target_size_m = scenario->target_size_m;
+    cfg->marker_size_m = scenario->marker_size_m;
+    cfg->nominal_dt_s = scenario->dt;
+    cfg->home_pos = scenario->home_pos;
+    cfg->outbound_route = scenario->outbound_route;
+    cfg->search_route = scenario->search_route;
 }
 
 int scenario_apply_kind(Scenario *scenario, const char *name)
@@ -189,6 +117,10 @@ int scenario_apply_kind(Scenario *scenario, const char *name)
         scenario->home_loss_end_s = 20.0f;
     } else if (strcmp(name, "local-obstacle") == 0) {
         scenario->kind = SCENARIO_LOCAL_OBSTACLE;
+        /* Exercise the planner detour on the active edge immediately. */
+        wq_init(&scenario->outbound_route);
+        (void)wq_push(&scenario->outbound_route,
+                      vec3(3.5f, 0.5f, 1.2f), 1.8f);
         obstacle.valid = 1u;
         obstacle.obstacle_id = 1u;
         obstacle.position = vec3(2.7f, 0.2f, 1.2f);
@@ -208,8 +140,9 @@ int scenario_apply_kind(Scenario *scenario, const char *name)
         scenario->other_agent.valid = 1u;
         scenario->other_agent.quality = 1.0f;
         scenario->other_agent.age_s = 0.0f;
-        scenario->other_agent.pos = vec3(1.8f, 1.1f, 1.2f);
-        scenario->other_agent.vel = vec3(0.0f, -0.20f, 0.0f);
+        /* The higher-ID vehicle yields to +y while the peer crosses from -y. */
+        scenario->other_agent.pos = vec3(1.8f, -1.1f, 1.2f);
+        scenario->other_agent.vel = vec3(0.0f, 0.20f, 0.0f);
         scenario->swarm_avoidance.mode = SWARM_ENABLED;
     } else {
         return -1;

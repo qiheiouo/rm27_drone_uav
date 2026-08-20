@@ -1,6 +1,6 @@
 # STM32 移植层
 
-本目录提供板级接口契约和固定内存 `NavApp` 装配。它能在主机编译检查，但不包含具体 HAL、RTOS、相机检测器或低层飞控。
+本目录提供板级接口契约和固定内存 `NavApp` 装配。`NavApp` 内部调用与主机仿真相同的 `NavRuntime`，本目录只读取板级输入并发送控制输出。它能在主机编译检查，但不包含具体 HAL、RTOS、相机检测器或低层飞控。
 
 ## 任务优先级
 
@@ -34,8 +34,11 @@ static NavAppConfig config;
 
 void nav_task(void *argument)
 {
-    board_fill_and_validate_nav_config(&config);
-    nav_app_init(&app, &config);
+    nav_runtime_config_default(&config);
+    board_apply_calibrated_nav_config(&config);
+    if (nav_app_init(&app, &config) != NAV_CONFIG_ERROR_NONE) {
+        board_enter_safe_fault();
+    }
     for (;;) {
         nav_app_step(&app, 0.01f);
         os_delay_until_next_period();
@@ -43,7 +46,7 @@ void nav_task(void *argument)
 }
 ```
 
-配置项必须来自实机标定和安全评审。`simulation/scenario.c` 只能作为字段填写示例，不能当作可直接飞行的参数集。
+`nav_app_init` 会检查任务时序、安全截止时间、估计器、控制器、规划工作区、相机、航线与蜂群参数，失败时保持未解锁。该检查只能排除结构性错误，配置值仍必须来自实机标定和安全评审。`simulation/scenario.c` 不能当作可直接飞行的参数集。
 
 ## 约束检查
 

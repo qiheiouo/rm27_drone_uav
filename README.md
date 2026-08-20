@@ -17,7 +17,7 @@
 | 安全管理 | 软/硬任务截止时间、围栏、估计器质量、轨迹有效性、控制饱和和碰撞风险分级；短时风险去抖 |
 | 动态障碍 | 最多 8 个局部/动态障碍，最近接预测、横向避让和紧急爬升输出 |
 | 多机扩展 | 最多 4 个他机状态、带时间戳未来轨迹消息、超时处理、未来冲突检测，以及按 `agent_id` 确定性让行；默认可关闭 |
-| STM32 对接 | 与主机同序的 `NavApp` 调用链和板级接口契约；无堆分配、固定容量数组 |
+| STM32 对接 | 主机与 STM32 共用 `NavRuntime` 算法调用链，板级只负责输入输出适配；无堆分配、固定容量数组 |
 
 算法选择参考了 EGO-Planner、EGO-Swarm、分布式群体轨迹优化、bearing 相对定位、《Swarm of micro flying robots in the wild》及 GCOPTER。项目只提取固定维度轨迹、约束后检查、轨迹时标缩放、带时效的未来状态共享和相对观测恢复等思想；未把 ESDF、ROS、完整 VIO、L-BFGS 或一般非线性优化器直接搬到 MCU。
 
@@ -31,6 +31,8 @@ cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
 
+`build/` 是约定的本机构建目录，`build*/` 均已被 Git 忽略，可在切换机器、生成器或源码路径后安全删除并重新生成。不要复制或提交 CMake 缓存和编译产物。
+
 默认仿真：
 
 ```powershell
@@ -43,11 +45,11 @@ ctest --test-dir build --output-on-failure
 .\build\mission_sim.exe --hard-impact --seed 23
 ```
 
-退出码：`0` 为任务完成并停靠；`2` 为紧急降落；`3` 为仿真超时；`4` 表示场景虽然到达终点，但声明的压力分支没有真正触发。
+退出码：`0` 为任务完成并停靠；`2` 为紧急降落；`3` 为仿真超时；`4` 表示场景虽然到达终点，但声明的压力分支没有真正触发；`5` 表示共享运行时拒绝了无效输入。
 
-当前 CTest 共 53 项：
+当前 CTest 共 54 项：
 
-- 11 个模块级测试；
+- 12 个模块级测试（含共享运行时配置、失效轨迹与蜂群安全链路）；
 - 1 个默认闭环测试；
 - 9 个具名压力场景；
 - 32 个随机种子、撞击后 LOST、剧烈撞击及真值对照回归。
@@ -57,7 +59,7 @@ ctest --test-dir build --output-on-failure
 ## 目录边界
 
 ```text
-core/            MCU 兼容的数学、估计、FSM、制导、规划和安全算法
+core/            MCU 兼容的共享运行时、数学、估计、FSM、制导、规划和安全算法
 perception/      相机模型、光流前端、目标/基座跟踪
 flight/          导航到低层飞控的控制接口
 swarm/           可关闭的多机状态、轨迹消息和冲突处理
@@ -72,7 +74,7 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 
 ## STM32 对接路径
 
-1. 依据 `simulation/scenario.c` 将经过实机标定的参数填入静态 `NavAppConfig`；不要原样照搬仿真参数。
+1. 先用 `nav_runtime_config_default` 建立字段完整的静态 `NavAppConfig`，再用实机标定值覆盖；不要原样照搬仿真参数。
 2. 实现 `platform/stm32/nav_platform.h` 中的时钟、IMU、ToF、光流、双相机、局部障碍、任务命令、停靠状态、多机通信和 FCU 输出接口。
 3. 以 100–200 Hz 调用 `nav_app_step`。IMU 采样、姿态/角速度环、混控和电机输出必须运行在更高优先级。
 4. 在解锁前完成坐标系、单位、时间戳回绕、传感器失效、围栏、紧急指令和停靠触点的台架测试。
