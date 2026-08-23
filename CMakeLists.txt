@@ -11,6 +11,7 @@ endif()
 # MCU 兼容核心 + host 仿真。所有代码 C99、静态内存、无动态分配。
 add_library(nav_core STATIC
     core/diagnostics/nav_event_log.c
+    core/diagnostics/nav_telemetry.c
     core/runtime/nav_runtime.c
     core/planner/waypoint.c
     core/planner/trajectory.c
@@ -82,6 +83,9 @@ target_link_libraries(mission_sim PRIVATE nav_sim)
 add_executable(nav_replay platform/host/replay.c)
 target_link_libraries(nav_replay PRIVATE nav_core)
 
+add_executable(nav_telemetry_dump platform/host/telemetry_dump.c)
+target_link_libraries(nav_telemetry_dump PRIVATE nav_core)
+
 # STM32 移植层骨架：host 编译检查（板级函数仅声明，静态库无需链接）
 add_library(nav_stm32_port STATIC platform/stm32/nav_tasks.c)
 target_link_libraries(nav_stm32_port PUBLIC nav_core)
@@ -123,6 +127,10 @@ foreach(scenario
     set_tests_properties(fault_${scenario} PROPERTIES
         PASS_REGULAR_EXPRESSION "FAULT_REGRESSION_SUCCESS")
 endforeach()
+
+add_executable(test_telemetry tests/test_telemetry.c)
+target_link_libraries(test_telemetry PRIVATE nav_core)
+add_test(NAME test_telemetry COMMAND test_telemetry)
 
 # 完整闭环作为集成测试：必须输出 MISSION_SUCCESS
 add_test(NAME mission_closed_loop COMMAND mission_sim)
@@ -171,3 +179,28 @@ endforeach()
 add_test(NAME mc_truth_mode COMMAND mission_sim --truth-mode --seed 5)
 set_tests_properties(mc_truth_mode PROPERTIES
     PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+
+set(TELEMETRY_TEST_FILE
+    ${CMAKE_CURRENT_BINARY_DIR}/mission_telemetry_test.bin)
+add_test(NAME telemetry_record
+    COMMAND mission_sim --truth-mode --telemetry ${TELEMETRY_TEST_FILE})
+set_tests_properties(telemetry_record PROPERTIES
+    PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+add_test(NAME telemetry_validate
+    COMMAND nav_telemetry_dump ${TELEMETRY_TEST_FILE})
+set_tests_properties(telemetry_validate PROPERTIES
+    DEPENDS telemetry_record
+    PASS_REGULAR_EXPRESSION "TELEMETRY_OK")
+
+set(FAULT_TELEMETRY_TEST_FILE
+    ${CMAKE_CURRENT_BINARY_DIR}/fault_telemetry_test.bin)
+add_test(NAME fault_telemetry_record
+    COMMAND mission_sim --scenario imu-stale
+            --telemetry ${FAULT_TELEMETRY_TEST_FILE})
+set_tests_properties(fault_telemetry_record PROPERTIES
+    PASS_REGULAR_EXPRESSION "FAULT_REGRESSION_SUCCESS")
+add_test(NAME fault_telemetry_validate
+    COMMAND nav_telemetry_dump ${FAULT_TELEMETRY_TEST_FILE})
+set_tests_properties(fault_telemetry_validate PROPERTIES
+    DEPENDS fault_telemetry_record
+    PASS_REGULAR_EXPRESSION "TELEMETRY_OK")

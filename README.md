@@ -18,7 +18,7 @@
 | 动态障碍 | 最多 8 个局部/动态障碍，最近接预测、横向避让和紧急爬升输出 |
 | 多机扩展 | 最多 4 个他机状态、带时间戳未来轨迹消息、超时处理、未来冲突检测，以及按 `agent_id` 确定性让行；默认可关闭 |
 | STM32 对接 | 主机与 STM32 共用 `NavRuntime` 算法调用链，板级只负责输入输出适配；无堆分配、固定容量数组 |
-| 诊断与回放 | 输入过期/重复/乱序检查、连续周期 watchdog、64 条固定内存事件环，以及确定性 CSV 回放工具 |
+| 诊断与回放 | 输入过期/重复/乱序检查、连续周期 watchdog、64 条固定内存事件环、确定性 CSV 回放，以及带版本/CRC 的二进制遥测 |
 | 故障回归 | 固定内存、确定性的传感器丢包/时间戳异常/非有限值/调度超时注入，并校验恢复、拒绝输出和紧急降落结果 |
 
 算法选择参考了 EGO-Planner、EGO-Swarm、分布式群体轨迹优化、bearing 相对定位、《Swarm of micro flying robots in the wild》及 GCOPTER。项目只提取固定维度轨迹、约束后检查、轨迹时标缩放、带时效的未来状态共享和相对观测恢复等思想；未把 ESDF、ROS、完整 VIO、L-BFGS 或一般非线性优化器直接搬到 MCU。
@@ -50,14 +50,18 @@ ctest --test-dir build --output-on-failure
 .\build\mission_sim.exe --hard-impact --seed 23
 .\build\nav_replay.exe tests\data\replay_stationary.csv
 .\build\nav_replay.exe --verify tests\data\replay_stationary.csv
+.\build\mission_sim.exe --telemetry build\mission.bin
+.\build\nav_telemetry_dump.exe build\mission.bin
+.\build\nav_telemetry_dump.exe --csv build\mission.bin
 ```
 
-退出码：普通任务中，`0` 为任务完成并停靠，`2` 为紧急降落，`3` 为仿真超时，`4` 表示声明的压力分支没有真正触发，`5` 表示共享运行时拒绝无效输入，`6` 表示运行时产生非有限输出。故障回归场景只有在实际结果、诊断掩码和安全动作均符合声明时才返回 `0`，并输出 `FAULT_REGRESSION_SUCCESS`；因此 `imu-stale` 的“安全拒绝”和 `watchdog-overrun` 的“紧急降落”属于测试通过，而不是任务成功。
+退出码：普通任务中，`0` 为任务完成并停靠，`2` 为紧急降落，`3` 为仿真超时，`4` 表示声明的压力分支没有真正触发，`5` 表示共享运行时拒绝无效输入，`6` 表示运行时产生非有限输出，`7` 表示遥测写入、编码或关闭失败。故障回归场景只有在实际结果、诊断掩码和安全动作均符合声明时才返回 `0`，并输出 `FAULT_REGRESSION_SUCCESS`；因此 `imu-stale` 的“安全拒绝”和 `watchdog-overrun` 的“紧急降落”属于测试通过，而不是任务成功。
 
-当前 CTest 共 65 项：
+当前 CTest 共 70 项：
 
-- 14 个模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、失效轨迹与蜂群安全链路）；
+- 15 个模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、遥测编解码、失效轨迹与蜂群安全链路）；
 - 8 个端到端故障回归场景；
+- 4 个遥测录制与逐帧校验集成测试（含运行时拒绝时的故障现场保留）；
 - 1 个默认闭环测试；
 - 1 个确定性日志回放测试；
 - 9 个具名压力场景；
@@ -66,6 +70,8 @@ ctest --test-dir build --output-on-failure
 具名场景包括 `moving-target`、`target-loss`、`impact-degraded`、`impact-lost`、`home-initial-hidden`、`home-loss`、`local-obstacle`、`forced-return` 和 `two-agent-conflict`。场景程序会检查相应异常分支确实被执行，而不只检查最终出现 `MISSION_SUCCESS`。
 
 故障场景包括 `flow-dropout`、`target-freeze`、`home-delay`、`nan-target`、`imu-stale`、`imu-duplicate`、`imu-rollback` 和 `watchdog-overrun`。完整规则、判定标准与扩展方式见[故障注入与安全回归](docs/fault_injection.md)。
+
+遥测格式、带宽和板级队列约束见[结构化遥测](docs/telemetry.md)。遥测保存运行结果，用于诊断；CSV 回放保存运行输入，用于重现。二者不能互相替代。
 
 ## 目录边界
 

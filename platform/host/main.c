@@ -7,6 +7,7 @@
 #include "scenario.h"
 #include "sim_sensors.h"
 #include "sim_vision.h"
+#include "nav_telemetry.h"
 
 static void print_scenarios(void)
 {
@@ -194,6 +195,33 @@ static uint8_t fault_expectations_met(const Scenario *scenario,
     return observed->outputs_finite;
 }
 
+static uint8_t write_telemetry_frame(FILE *file,
+                                     const NavRuntimeOutput *output,
+                                     uint32_t timestamp_ms,
+                                     uint32_t *sequence)
+{
+    NavTelemetrySnapshot snapshot;
+    uint8_t frame[NAV_TELEMETRY_FRAME_SIZE];
+    if (file == 0) return 1u;
+    if (!nav_telemetry_capture(&snapshot, output, *sequence, timestamp_ms) ||
+        nav_telemetry_encode(&snapshot, frame) != NAV_TELEMETRY_OK ||
+        fwrite(frame, 1u, NAV_TELEMETRY_FRAME_SIZE, file) !=
+            NAV_TELEMETRY_FRAME_SIZE) {
+        return 0u;
+    }
+    (*sequence)++;
+    return 1u;
+}
+
+static int finish_with_telemetry(FILE *file, int result)
+{
+    if (file != 0 && fclose(file) != 0) {
+        fprintf(stderr, "failed to close telemetry output\n");
+        return result == 0 ? 7 : result;
+    }
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     Scenario scenario;
@@ -204,6 +232,9 @@ int main(int argc, char **argv)
     NavRuntime runtime;
     SimFaultState fault_state;
     FaultRegressionObservation fault_observation;
+    FILE *telemetry_file = 0;
+    const char *telemetry_path = 0;
+    uint32_t telemetry_sequence = 0u;
     float last_impact_time = -100.0f;
     float time = 0.0f;
     float max_position_error = 0.0f;
@@ -243,6 +274,9 @@ int main(int argc, char **argv)
             scenario.impact_delta_roll = 1.4f;
             scenario.vision_freeze_s = 0.8f;
             scenario.estimator.impact_blind_s = 0.8f;
+        } else if (strcmp(argv[argument_index], "--telemetry") == 0 &&
+                   argument_index + 1 < argc) {
+            telemetry_path = argv[++argument_index];
         } else if (strcmp(argv[argument_index], "--seed") == 0 &&
                    argument_index + 1 < argc) {
             scenario.seed = (uint32_t)strtoul(argv[++argument_index], 0, 10);
@@ -273,11 +307,24 @@ int main(int argc, char **argv)
     }
     sim_vision_world_init(&vision_world, scenario.seed,
                           scenario.feature_area_m, scenario.feature_count);
+    if (telemetry_path != 0) {
+        telemetry_file = fopen(telemetry_path, "wb");
+        if (telemetry_file == 0) {
+            fprintf(stderr, "cannot open telemetry output: %s\n",
+                    telemetry_path);
+            return 1;
+        }
+    }
 
     printf("# RM Drone Nav Plan-B algorithm prototype\n");
     printf("# scenario=%s dt=%.3f budget=%.1fs seed=%u estimator=%s\n",
            scenario.name, scenario.dt, scenario.safety.max_mission_time_s,
            scenario.seed, scenario.estimator.mode == EST_MODE_INS ? "INS+VO" : "TRUTH");
+    if (telemetry_file != 0) {
+        printf("# telemetry=%s schema=%u frame_size=%u\n", telemetry_path,
+               (unsigned int)NAV_TELEMETRY_SCHEMA_VERSION,
+               (unsigned int)NAV_TELEMETRY_FRAME_SIZE);
+    }
 
     while (time < scenario.sim_max_time_s) {
         uint32_t time_ms = (uint32_t)(time * 1000.0f);
@@ -373,6 +420,11 @@ int main(int argc, char **argv)
             observe_runtime(&scenario, &fault_state, &runtime.output,
                             nav_runtime_event_log(&runtime),
                             &fault_observation);
+            if (!write_telemetry_frame(telemetry_file, &runtime.output,
+                                       time_ms, &telemetry_sequence)) {
+                fprintf(stderr, "failed to write telemetry output\n");
+                return finish_with_telemetry(telemetry_file, 7);
+            }
             if (scenario.expectations.outcome ==
                     SCENARIO_EXPECT_RUNTIME_REJECT &&
                 !runtime.output.armed && !runtime.output.step_valid &&
@@ -383,10 +435,15 @@ int main(int argc, char **argv)
                 printf("[t=%6.2f] FAULT_REGRESSION_SUCCESS scenario=%s "
                        "outcome=runtime-reject control=zero\n",
                        time, scenario.name);
-                return 0;
+                return finish_with_telemetry(telemetry_file, 0);
             }
             printf("MISSION_FAILED scenario=%s runtime rejected input\n", scenario.name);
-            return 5;
+            return finish_with_telemetry(telemetry_file, 5);
+        }
+        if (!write_telemetry_frame(telemetry_file, &runtime.output,
+                                   time_ms, &telemetry_sequence)) {
+            fprintf(stderr, "failed to write telemetry output\n");
+            return finish_with_telemetry(telemetry_file, 7);
         }
         observe_runtime(&scenario, &fault_state, &runtime.output,
                         nav_runtime_event_log(&runtime),
@@ -394,7 +451,7 @@ int main(int argc, char **argv)
         if (!fault_observation.outputs_finite) {
             printf("MISSION_FAILED scenario=%s non-finite runtime output\n",
                    scenario.name);
-            return 6;
+            return finish_with_telemetry(telemetry_file, 6);
         }
 
         if ((runtime.output.event_flags & NAV_EVENT_IMPACT_CONFIRMED) != 0u) {
@@ -534,7 +591,7 @@ int main(int argc, char **argv)
             if (!expectations_met) {
                 printf("[t=%6.2f] MISSION_FAILED scenario=%s expected branch not exercised\n",
                        time, scenario.name);
-                return 4;
+                return finish_with_telemetry(telemetry_file, 4);
             }
             printf("[t=%6.2f] MISSION_SUCCESS scenario=%s dist_to_home=%.3f m "
                    "elapsed=%.2f s remaining=%.2f s max_est_err=%.2f m\n",
@@ -546,7 +603,7 @@ int main(int argc, char **argv)
                        time, scenario.name,
                        (unsigned int)fault_state.applied_rule_mask);
             }
-            return 0;
+            return finish_with_telemetry(telemetry_file, 0);
         }
         if (runtime.output.mission.mission_failed) {
             if (scenario.expectations.outcome ==
@@ -558,17 +615,17 @@ int main(int argc, char **argv)
                        "outcome=emergency-land watchdog=%u\n",
                        time, scenario.name,
                        (unsigned int)runtime.output.health.watchdog_tripped);
-                return 0;
+                return finish_with_telemetry(telemetry_file, 0);
             }
             printf("[t=%6.2f] MISSION_FAILED scenario=%s emergency landed "
                    "max_est_err=%.2f m\n",
                    time, scenario.name, max_position_error);
-            return 2;
+            return finish_with_telemetry(telemetry_file, 2);
         }
         time += scenario.dt;
     }
 
     printf("MISSION_FAILED scenario=%s simulation timeout (%.1f s), last_state=%s\n",
            scenario.name, time, mission_state_name(runtime.output.mission.state));
-    return 3;
+    return finish_with_telemetry(telemetry_file, 3);
 }
