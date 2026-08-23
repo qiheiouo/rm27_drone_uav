@@ -42,6 +42,7 @@ add_library(nav_core STATIC
     perception/camera/camera.c
     perception/vision_frontend/vision_frontend.c
     flight/controller_interface/pos_controller.c
+    flight/fcu_bridge/fcu_bridge.c
     swarm/collision_interface/collision_interface.c
     swarm/collision_interface/swarm_avoidance.c
     swarm/trajectory_message/trajectory_message.c
@@ -70,6 +71,7 @@ target_include_directories(nav_core PUBLIC
     perception/vision_frontend
     perception/camera
     flight/controller_interface
+    flight/fcu_bridge
     flight/flight_state
     swarm/agent_state
     swarm/trajectory_message
@@ -92,8 +94,12 @@ target_link_libraries(nav_replay PRIVATE nav_core)
 add_executable(nav_telemetry_dump platform/host/telemetry_dump.c)
 target_link_libraries(nav_telemetry_dump PRIVATE nav_core)
 
+add_executable(fcu_bridge_sim platform/host/fcu_bridge_sim.c)
+target_link_libraries(fcu_bridge_sim PRIVATE nav_core)
+
 # STM32 移植层骨架：host 编译检查（板级函数仅声明，静态库无需链接）
 add_library(nav_stm32_port STATIC platform/stm32/nav_tasks.c)
+target_include_directories(nav_stm32_port PUBLIC platform/stm32)
 target_link_libraries(nav_stm32_port PUBLIC nav_core)
 
 enable_testing()
@@ -113,11 +119,20 @@ foreach(t
     test_nav_runtime
     test_diagnostics
     test_fault_injection
+    test_fcu_bridge
 )
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core nav_sim)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+add_test(NAME fcu_bridge_uart_outage COMMAND fcu_bridge_sim)
+set_tests_properties(fcu_bridge_uart_outage PROPERTIES
+    PASS_REGULAR_EXPRESSION "FCU_BRIDGE_SIM_SUCCESS")
+
+add_executable(test_nav_app_fcu tests/test_nav_app_fcu.c)
+target_link_libraries(test_nav_app_fcu PRIVATE nav_stm32_port nav_core)
+add_test(NAME test_nav_app_fcu COMMAND test_nav_app_fcu)
 
 foreach(scenario
     flow-dropout

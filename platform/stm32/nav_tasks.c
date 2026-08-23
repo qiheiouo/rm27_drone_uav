@@ -43,6 +43,28 @@ static void nav_app_flush_events(NavApp *app)
     }
 }
 
+static void nav_app_disable_fcu(NavApp *app, uint32_t timestamp_ms)
+{
+    FcuSetpoint setpoint;
+    fcu_setpoint_disable(app->fcu_command_sequence++, timestamp_ms, &setpoint);
+    if (nav_fcu_setpoint_write(&setpoint) != 0) app->fcu_tx_drops++;
+    nav_fcu_set_armed(0u);
+}
+
+static void nav_app_send_fcu(NavApp *app, uint32_t timestamp_ms)
+{
+    FcuSetpoint setpoint;
+    if (!fcu_setpoint_from_nav(&app->runtime.output.guidance,
+                               &app->runtime.output.control,
+                               FCU_CONTROL_AUTO,
+                               app->runtime.output.armed,
+                               app->fcu_command_sequence++, timestamp_ms,
+                               NAV_APP_FCU_COMMAND_VALIDITY_MS, &setpoint) ||
+        nav_fcu_setpoint_write(&setpoint) != 0) {
+        app->fcu_tx_drops++;
+    }
+}
+
 uint32_t nav_app_init(NavApp *app, const NavAppConfig *cfg)
 {
     if (app == 0) return NAV_CONFIG_ERROR_ARGUMENT;
@@ -50,6 +72,8 @@ uint32_t nav_app_init(NavApp *app, const NavAppConfig *cfg)
     app->next_log_sequence = 0u;
     app->telemetry_sequence = 0u;
     app->telemetry_step_count = 0u;
+    app->fcu_tx_drops = 0u;
+    app->fcu_command_sequence = 0u;
     if (app->config_errors != NAV_CONFIG_ERROR_NONE) {
         nav_log("navigation configuration invalid");
     }
@@ -75,13 +99,14 @@ void nav_app_step(NavApp *app, float dt)
     uint8_t obstacles_valid;
     uint8_t swarm_valid;
 
-    if (app == 0 || app->config_errors != NAV_CONFIG_ERROR_NONE ||
+    if (app == 0) return;
+    time_ms = nav_time_ms();
+    if (app->config_errors != NAV_CONFIG_ERROR_NONE ||
         nav_imu_read(&imu) != 0) {
-        nav_fcu_set_armed(0u);
+        nav_app_disable_fcu(app, time_ms);
         return;
     }
 
-    time_ms = nav_time_ms();
     (void)nav_tof_read(&tof_height);
     flow_valid = (nav_flow_read(&frame) == 0) ? 1u : 0u;
     target_valid = (nav_camera_target_read(&target_pixel) == 0) ? 1u : 0u;
@@ -120,13 +145,13 @@ void nav_app_step(NavApp *app, float dt)
     if (!nav_runtime_step(&app->runtime, &input)) {
         nav_app_flush_events(app);
         nav_app_emit_telemetry(app, time_ms, 1u);
-        nav_fcu_set_armed(0u);
+        nav_app_disable_fcu(app, time_ms);
         return;
     }
 
     nav_app_flush_events(app);
     nav_app_emit_telemetry(app, time_ms, 0u);
     nav_swarm_state_send(&app->runtime.output.swarm_self);
+    nav_app_send_fcu(app, time_ms);
     nav_fcu_set_armed(app->runtime.output.armed);
-    nav_fcu_send(&app->runtime.output.control);
 }
