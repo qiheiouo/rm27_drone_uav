@@ -29,7 +29,8 @@ enum {
     SAFETY_REASON_IMPACT = 1u << 4,
     SAFETY_REASON_COLLISION = 1u << 5,
     SAFETY_REASON_TRAJECTORY = 1u << 6,
-    SAFETY_REASON_CONTROLLER = 1u << 7
+    SAFETY_REASON_CONTROLLER = 1u << 7,
+    SAFETY_REASON_SWARM_LINK = 1u << 8
 };
 
 typedef struct {
@@ -52,12 +53,13 @@ typedef struct {
     CollisionRiskLevel collision_risk;
     uint8_t trajectory_valid;
     uint8_t controller_saturated;
+    uint8_t swarm_link_guard_active;
     float dt;
 } SafetyInput;
 
 typedef struct {
     SafetyLevel level;
-    uint8_t reason_mask;
+    uint32_t reason_mask;
     float elapsed_s;
     float remaining_s;
     uint8_t request_return;

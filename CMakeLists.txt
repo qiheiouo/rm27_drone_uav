@@ -45,6 +45,7 @@ add_library(nav_core STATIC
     swarm/collision_interface/collision_interface.c
     swarm/collision_interface/swarm_avoidance.c
     swarm/link/swarm_link.c
+    swarm/link/swarm_link_guard.c
     swarm/trajectory_message/trajectory_message.c
 )
 
@@ -118,6 +119,7 @@ foreach(t
     test_planner_avoidance
     test_swarm
     test_swarm_link
+    test_swarm_link_guard
     test_swarm_network
     test_nav_runtime
     test_diagnostics
@@ -132,6 +134,7 @@ foreach(scenario
     nominal
     lossy
     outage
+    guarded-outage
     four-agent
 )
     add_test(NAME swarm_${scenario} COMMAND swarm_sim --scenario ${scenario})

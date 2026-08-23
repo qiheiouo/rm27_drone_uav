@@ -69,6 +69,17 @@ int main(void)
     CHECK((errors & NAV_CONFIG_ERROR_CAMERA) != 0u);
 
     nav_runtime_config_default(&cfg);
+    cfg.swarm_link_guard.enabled = 2u;
+    cfg.swarm_link_guard.recovery_confirm_s = 0.0f;
+    errors = nav_runtime_config_validate(&cfg);
+    CHECK((errors & NAV_CONFIG_ERROR_SWARM) != 0u);
+
+    nav_runtime_config_default(&cfg);
+    cfg.swarm_link_guard.enabled = 1u;
+    errors = nav_runtime_config_validate(&cfg);
+    CHECK((errors & NAV_CONFIG_ERROR_SWARM) != 0u);
+
+    nav_runtime_config_default(&cfg);
     wq_init(&cfg.outbound_route);
     errors = nav_runtime_config_validate(&cfg);
     CHECK((errors & NAV_CONFIG_ERROR_ROUTE) != 0u);

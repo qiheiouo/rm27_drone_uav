@@ -29,7 +29,8 @@ int main(void)
     output.mission.transition_reason = MISSION_REASON_RECOVERY_COMPLETE;
     output.mission.docking_stage = DOCK_APPROACH;
     output.safety.level = SAFETY_RETURN_REQUIRED;
-    output.safety.reason_mask = SAFETY_REASON_SOFT_DEADLINE;
+    output.safety.reason_mask = SAFETY_REASON_SOFT_DEADLINE |
+                                SAFETY_REASON_SWARM_LINK;
     output.safety.remaining_s = 12.5f;
     output.health.stale_source_mask = NAV_INPUT_SOURCE_FLOW;
     output.health.cycle_gap_ms = 10u;
@@ -64,6 +65,7 @@ int main(void)
     CHECK(decoded.timestamp_ms == snapshot.timestamp_ms);
     CHECK(decoded.mission_state == (uint8_t)MS_RETURN_HOME);
     CHECK(decoded.estimator_status == (uint8_t)EST_TRACKING);
+    CHECK(decoded.safety_reason_mask == snapshot.safety_reason_mask);
     CHECK(decoded.position.x == snapshot.position.x);
     CHECK(decoded.acceleration_command.z == snapshot.acceleration_command.z);
     CHECK(decoded.flags == snapshot.flags);

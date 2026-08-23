@@ -84,8 +84,10 @@ SafetyDecision safety_update_full(SafetyMonitor *monitor,
         decision.reason_mask |= SAFETY_REASON_SOFT_DEADLINE;
         decision.request_return = 1u;
     }
-    if (input->nav->status == EST_DEGRADED || input->nav->quality < monitor->cfg.min_estimator_quality ||
-        input->collision_risk != COLLISION_RISK_NONE) {
+    if (input->nav->status == EST_DEGRADED ||
+        input->nav->quality < monitor->cfg.min_estimator_quality ||
+        input->collision_risk != COLLISION_RISK_NONE ||
+        input->swarm_link_guard_active) {
         if (decision.level < SAFETY_DEGRADED) {
             decision.level = SAFETY_DEGRADED;
         }
@@ -95,6 +97,9 @@ SafetyDecision safety_update_full(SafetyMonitor *monitor,
         }
         if (input->collision_risk != COLLISION_RISK_NONE) {
             decision.reason_mask |= SAFETY_REASON_COLLISION;
+        }
+        if (input->swarm_link_guard_active) {
+            decision.reason_mask |= SAFETY_REASON_SWARM_LINK;
         }
     }
     if (input->impact_state == CONFIRMED_IMPACT) {
@@ -136,6 +141,7 @@ void safety_update(SafetyMonitor *monitor, const NavState *nav,
     input.collision_risk = COLLISION_RISK_NONE;
     input.trajectory_valid = 1u;
     input.controller_saturated = 0u;
+    input.swarm_link_guard_active = 0u;
     input.dt = dt;
     (void)safety_update_full(monitor, &input);
 }

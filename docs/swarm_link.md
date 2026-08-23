@@ -70,3 +70,4 @@ int nav_swarm_frame_write(const uint8_t *frame, uint16_t size);
 
 无实物阶段可使用[确定性多机网络仿真](swarm_simulation.md)，让多个独立 `NavRuntime`
 通过本协议完成正常、有损、失联和四机容量回归；其中的故障参数只用于软件验证，不能替代实测链路指标。
+冲突相关邻机超时后的保守位置保持与恢复确认见[冲突邻机失联保护](swarm_link_guard.md)。
