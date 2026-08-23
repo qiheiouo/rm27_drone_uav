@@ -120,3 +120,5 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 - FCU 桥接已有协议无关契约和参考字节流，但尚未绑定或验证任何具体飞控固件。
 
 进一步说明见 [架构文档](docs/architecture.md)、[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
+
+如果需要从整体上理解系统，或准备向其他开发者介绍项目，请阅读[系统工作原理与项目讲解指南](docs/system_overview_and_presentation_guide.md)。
