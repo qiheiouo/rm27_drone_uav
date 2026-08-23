@@ -2,6 +2,55 @@
 #include "nav_tasks.h"
 #include "nav_platform.h"
 
+static uint32_t nav_app_swarm_max_age_ms(const NavAppConfig *cfg)
+{
+    float age_s = cfg->swarm_collision.max_message_age_s;
+    if (age_s >= 4294967.0f) return UINT32_MAX;
+    return (uint32_t)(age_s * 1000.0f + 0.5f);
+}
+
+static void nav_app_receive_swarm(NavApp *app, uint32_t now_ms,
+                                  SwarmView *view)
+{
+    uint32_t iteration;
+    if (app->runtime.cfg.swarm_avoidance.mode == SWARM_DISABLED) {
+        swarm_view_init(view, app->runtime.cfg.self_agent_id);
+        return;
+    }
+    for (iteration = 0u; iteration < NAV_APP_SWARM_RX_BUDGET; iteration++) {
+        uint8_t frame[SWARM_LINK_STATE_FRAME_SIZE];
+        uint16_t size = 0u;
+        AgentState state;
+        if (nav_swarm_frame_read(frame, sizeof(frame), &size) != 0) break;
+        if (swarm_link_decode_state(frame, size, &state) != SWARM_LINK_OK) {
+            app->swarm_decode_errors++;
+            continue;
+        }
+        (void)swarm_peer_registry_ingest(&app->swarm_peers, &state, now_ms);
+    }
+    swarm_peer_registry_build_view(&app->swarm_peers, 0, now_ms, view);
+}
+
+static void nav_app_send_swarm(NavApp *app)
+{
+#if NAV_APP_SWARM_TX_PERIOD_STEPS > 0u
+    AgentState state;
+    uint8_t frame[SWARM_LINK_STATE_FRAME_SIZE];
+    if (app->runtime.cfg.swarm_avoidance.mode == SWARM_DISABLED) return;
+    app->swarm_tx_step_count++;
+    if (app->swarm_tx_step_count < NAV_APP_SWARM_TX_PERIOD_STEPS) return;
+    app->swarm_tx_step_count = 0u;
+    state = app->runtime.output.swarm_self;
+    state.sequence = app->swarm_tx_sequence++;
+    if (swarm_link_encode_state(&state, frame) != SWARM_LINK_OK ||
+        nav_swarm_frame_write(frame, sizeof(frame)) != 0) {
+        app->swarm_tx_drops++;
+    }
+#else
+    (void)app;
+#endif
+}
+
 static void nav_app_emit_telemetry(NavApp *app, uint32_t timestamp_ms,
                                    uint8_t force)
 {
@@ -50,6 +99,14 @@ uint32_t nav_app_init(NavApp *app, const NavAppConfig *cfg)
     app->next_log_sequence = 0u;
     app->telemetry_sequence = 0u;
     app->telemetry_step_count = 0u;
+    app->swarm_decode_errors = 0u;
+    app->swarm_tx_drops = 0u;
+    app->swarm_tx_step_count = 0u;
+    app->swarm_tx_sequence = 0u;
+    swarm_peer_registry_init(&app->swarm_peers,
+        cfg != 0 ? cfg->self_agent_id : 0u,
+        cfg != 0 && app->config_errors == NAV_CONFIG_ERROR_NONE
+            ? nav_app_swarm_max_age_ms(cfg) : 500u);
     if (app->config_errors != NAV_CONFIG_ERROR_NONE) {
         nav_log("navigation configuration invalid");
     }
@@ -73,7 +130,6 @@ void nav_app_step(NavApp *app, float dt)
     uint8_t target_valid;
     uint8_t home_valid;
     uint8_t obstacles_valid;
-    uint8_t swarm_valid;
 
     if (app == 0 || app->config_errors != NAV_CONFIG_ERROR_NONE ||
         nav_imu_read(&imu) != 0) {
@@ -88,8 +144,7 @@ void nav_app_step(NavApp *app, float dt)
     home_valid = (nav_camera_home_read(&home_pixel) == 0) ? 1u : 0u;
     obstacle_set_init(&obstacles);
     obstacles_valid = (nav_local_obstacles_read(&obstacles) == 0) ? 1u : 0u;
-    swarm_view_init(&swarm, app->runtime.cfg.self_agent_id);
-    swarm_valid = (nav_swarm_view_read(&swarm) == 0) ? 1u : 0u;
+    nav_app_receive_swarm(app, time_ms, &swarm);
 
     mission_command.start = 0u;
     mission_command.request_return = 0u;
@@ -108,7 +163,7 @@ void nav_app_step(NavApp *app, float dt)
     input.target_pixel = target_valid ? &target_pixel : 0;
     input.home_pixel = home_valid ? &home_pixel : 0;
     input.obstacles = obstacles_valid ? &obstacles : 0;
-    input.swarm = swarm_valid ? &swarm : 0;
+    input.swarm = &swarm;
     input.start_command = mission_command.start;
     input.request_return = mission_command.request_return;
     input.request_emergency = mission_command.request_emergency;
@@ -126,7 +181,7 @@ void nav_app_step(NavApp *app, float dt)
 
     nav_app_flush_events(app);
     nav_app_emit_telemetry(app, time_ms, 0u);
-    nav_swarm_state_send(&app->runtime.output.swarm_self);
+    nav_app_send_swarm(app);
     nav_fcu_set_armed(app->runtime.output.armed);
     nav_fcu_send(&app->runtime.output.control);
 }
