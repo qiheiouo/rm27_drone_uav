@@ -2,10 +2,54 @@
 #include "nav_tasks.h"
 #include "nav_platform.h"
 
+static void nav_app_emit_telemetry(NavApp *app, uint32_t timestamp_ms,
+                                   uint8_t force)
+{
+#if NAV_APP_TELEMETRY_PERIOD_STEPS > 0u
+    NavTelemetrySnapshot snapshot;
+    uint8_t frame[NAV_TELEMETRY_FRAME_SIZE];
+    if (!force) {
+        app->telemetry_step_count++;
+        if (app->telemetry_step_count < NAV_APP_TELEMETRY_PERIOD_STEPS) return;
+    }
+    app->telemetry_step_count = 0u;
+    if (!nav_telemetry_capture(&snapshot, &app->runtime.output,
+                               app->telemetry_sequence, timestamp_ms) ||
+        nav_telemetry_encode(&snapshot, frame) != NAV_TELEMETRY_OK) {
+        nav_log("navigation telemetry encode failed");
+        return;
+    }
+    app->telemetry_sequence++;
+    (void)nav_telemetry_write(frame, NAV_TELEMETRY_FRAME_SIZE);
+#else
+    (void)app;
+    (void)timestamp_ms;
+    (void)force;
+#endif
+}
+
+static void nav_app_flush_events(NavApp *app)
+{
+    const NavEventLog *log = nav_runtime_event_log(&app->runtime);
+    NavEventRecord record;
+    uint16_t index;
+    if (log == 0 || log->next_sequence == app->next_log_sequence) return;
+    for (index = 0u; index < nav_event_log_count(log); index++) {
+        if (nav_event_log_get(log, index, &record) &&
+            record.sequence >= app->next_log_sequence) {
+            nav_log(nav_log_event_code_name(record.code));
+            app->next_log_sequence = record.sequence + 1u;
+        }
+    }
+}
+
 uint32_t nav_app_init(NavApp *app, const NavAppConfig *cfg)
 {
     if (app == 0) return NAV_CONFIG_ERROR_ARGUMENT;
     app->config_errors = nav_runtime_init(&app->runtime, cfg);
+    app->next_log_sequence = 0u;
+    app->telemetry_sequence = 0u;
+    app->telemetry_step_count = 0u;
     if (app->config_errors != NAV_CONFIG_ERROR_NONE) {
         nav_log("navigation configuration invalid");
     }
@@ -74,10 +118,14 @@ void nav_app_step(NavApp *app, float dt)
     input.dt = dt;
 
     if (!nav_runtime_step(&app->runtime, &input)) {
+        nav_app_flush_events(app);
+        nav_app_emit_telemetry(app, time_ms, 1u);
         nav_fcu_set_armed(0u);
         return;
     }
 
+    nav_app_flush_events(app);
+    nav_app_emit_telemetry(app, time_ms, 0u);
     nav_swarm_state_send(&app->runtime.output.swarm_self);
     nav_fcu_set_armed(app->runtime.output.armed);
     nav_fcu_send(&app->runtime.output.control);

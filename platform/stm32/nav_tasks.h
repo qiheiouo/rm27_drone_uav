@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include "nav_runtime.h"
 
+#ifndef NAV_APP_TELEMETRY_PERIOD_STEPS
+#define NAV_APP_TELEMETRY_PERIOD_STEPS 10u
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -14,6 +18,9 @@ typedef NavRuntimeConfig NavAppConfig;
 typedef struct {
     NavRuntime runtime;
     uint32_t config_errors;
+    uint32_t next_log_sequence;
+    uint32_t telemetry_sequence;
+    uint32_t telemetry_step_count;
 } NavApp;
 
 /* Returns the configuration error mask; zero means initialization succeeded. */

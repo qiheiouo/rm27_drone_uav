@@ -14,6 +14,7 @@
 #include "pos_controller.h"
 #include "obstacle_avoidance.h"
 #include "collision_interface.h"
+#include "nav_telemetry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,13 @@ void nav_swarm_state_send(const AgentState *self);
 void nav_fcu_send(const CtrlOutput *cmd);
 void nav_fcu_set_armed(uint8_t armed);
 void nav_log(const char *msg);
+
+/*
+ * Optional low-priority telemetry sink. It must copy/enqueue the complete
+ * frame before returning and must never block the navigation task. Return 0
+ * when accepted or negative when the queue is full/unavailable.
+ */
+int nav_telemetry_write(const uint8_t *frame, uint16_t size);
 
 #ifdef __cplusplus
 }

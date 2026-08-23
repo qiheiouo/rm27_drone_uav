@@ -4,12 +4,28 @@ project(rm_drone_nav C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+option(NAV_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+if(MSVC)
+    add_compile_options(/W4)
+    if(NAV_WARNINGS_AS_ERRORS)
+        add_compile_options(/WX)
+    endif()
+else()
+    add_compile_options(-Wall -Wextra)
+    if(NAV_WARNINGS_AS_ERRORS)
+        add_compile_options(-Werror)
+    endif()
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
 # MCU 兼容核心 + host 仿真。所有代码 C99、静态内存、无动态分配。
 add_library(nav_core STATIC
+    core/diagnostics/nav_event_log.c
+    core/diagnostics/nav_telemetry.c
     core/runtime/nav_runtime.c
     core/planner/waypoint.c
     core/planner/trajectory.c
@@ -32,6 +48,7 @@ add_library(nav_core STATIC
 )
 
 add_library(nav_sim STATIC
+    simulation/fault_injection.c
     simulation/scenario.c
     simulation/sim_dynamics.c
     simulation/sim_sensors.c
@@ -39,6 +56,7 @@ add_library(nav_sim STATIC
 )
 
 target_include_directories(nav_core PUBLIC
+    core/diagnostics
     core/runtime
     core/math
     core/filters
@@ -61,20 +79,18 @@ target_include_directories(nav_core PUBLIC
 target_include_directories(nav_sim PUBLIC simulation)
 target_link_libraries(nav_sim PUBLIC nav_core)
 
-if(MSVC)
-    target_compile_options(nav_core PRIVATE /W4)
-    target_compile_options(nav_sim PRIVATE /W4)
-else()
-    target_compile_options(nav_core PRIVATE -Wall -Wextra)
-    target_compile_options(nav_sim PRIVATE -Wall -Wextra)
-endif()
-
 if(UNIX)
     target_link_libraries(nav_core PUBLIC m)
 endif()
 
 add_executable(mission_sim platform/host/main.c)
 target_link_libraries(mission_sim PRIVATE nav_sim)
+
+add_executable(nav_replay platform/host/replay.c)
+target_link_libraries(nav_replay PRIVATE nav_core)
+
+add_executable(nav_telemetry_dump platform/host/telemetry_dump.c)
+target_link_libraries(nav_telemetry_dump PRIVATE nav_core)
 
 # STM32 移植层骨架：host 编译检查（板级函数仅声明，静态库无需链接）
 add_library(nav_stm32_port STATIC platform/stm32/nav_tasks.c)
@@ -95,16 +111,43 @@ foreach(t
     test_planner_avoidance
     test_swarm
     test_nav_runtime
+    test_diagnostics
+    test_fault_injection
 )
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core nav_sim)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
+foreach(scenario
+    flow-dropout
+    target-freeze
+    home-delay
+    nan-target
+    imu-stale
+    imu-duplicate
+    imu-rollback
+    watchdog-overrun
+)
+    add_test(NAME fault_${scenario} COMMAND mission_sim --scenario ${scenario})
+    set_tests_properties(fault_${scenario} PROPERTIES
+        PASS_REGULAR_EXPRESSION "FAULT_REGRESSION_SUCCESS")
+endforeach()
+
+add_executable(test_telemetry tests/test_telemetry.c)
+target_link_libraries(test_telemetry PRIVATE nav_core)
+add_test(NAME test_telemetry COMMAND test_telemetry)
+
 # 完整闭环作为集成测试：必须输出 MISSION_SUCCESS
 add_test(NAME mission_closed_loop COMMAND mission_sim)
 set_tests_properties(mission_closed_loop PROPERTIES
     PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+
+add_test(NAME replay_determinism
+    COMMAND nav_replay --verify
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/replay_stationary.csv)
+set_tests_properties(replay_determinism PROPERTIES
+    PASS_REGULAR_EXPRESSION "REPLAY_SUCCESS")
 
 foreach(scenario
     moving-target
@@ -142,3 +185,28 @@ endforeach()
 add_test(NAME mc_truth_mode COMMAND mission_sim --truth-mode --seed 5)
 set_tests_properties(mc_truth_mode PROPERTIES
     PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+
+set(TELEMETRY_TEST_FILE
+    ${CMAKE_CURRENT_BINARY_DIR}/mission_telemetry_test.bin)
+add_test(NAME telemetry_record
+    COMMAND mission_sim --truth-mode --telemetry ${TELEMETRY_TEST_FILE})
+set_tests_properties(telemetry_record PROPERTIES
+    PASS_REGULAR_EXPRESSION "MISSION_SUCCESS")
+add_test(NAME telemetry_validate
+    COMMAND nav_telemetry_dump ${TELEMETRY_TEST_FILE})
+set_tests_properties(telemetry_validate PROPERTIES
+    DEPENDS telemetry_record
+    PASS_REGULAR_EXPRESSION "TELEMETRY_OK")
+
+set(FAULT_TELEMETRY_TEST_FILE
+    ${CMAKE_CURRENT_BINARY_DIR}/fault_telemetry_test.bin)
+add_test(NAME fault_telemetry_record
+    COMMAND mission_sim --scenario imu-stale
+            --telemetry ${FAULT_TELEMETRY_TEST_FILE})
+set_tests_properties(fault_telemetry_record PROPERTIES
+    PASS_REGULAR_EXPRESSION "FAULT_REGRESSION_SUCCESS")
+add_test(NAME fault_telemetry_validate
+    COMMAND nav_telemetry_dump ${FAULT_TELEMETRY_TEST_FILE})
+set_tests_properties(fault_telemetry_validate PROPERTIES
+    DEPENDS fault_telemetry_record
+    PASS_REGULAR_EXPRESSION "TELEMETRY_OK")

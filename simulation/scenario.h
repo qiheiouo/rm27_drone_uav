@@ -19,6 +19,7 @@
 #include "collision_interface.h"
 #include "swarm_avoidance.h"
 #include "nav_runtime.h"
+#include "fault_injection.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,8 +35,40 @@ typedef enum {
     SCENARIO_HOME_LOSS,
     SCENARIO_LOCAL_OBSTACLE,
     SCENARIO_FORCED_RETURN,
-    SCENARIO_TWO_AGENT_CONFLICT
+    SCENARIO_TWO_AGENT_CONFLICT,
+    SCENARIO_FLOW_DROPOUT,
+    SCENARIO_TARGET_FREEZE,
+    SCENARIO_HOME_DELAY,
+    SCENARIO_NAN_TARGET,
+    SCENARIO_IMU_STALE,
+    SCENARIO_IMU_DUPLICATE,
+    SCENARIO_IMU_ROLLBACK,
+    SCENARIO_WATCHDOG_OVERRUN
 } ScenarioKind;
+
+typedef enum {
+    SCENARIO_EXPECT_COMPLETE = 0,
+    SCENARIO_EXPECT_RUNTIME_REJECT,
+    SCENARIO_EXPECT_EMERGENCY_LAND
+} ScenarioExpectedOutcome;
+
+typedef struct {
+    ScenarioExpectedOutcome outcome;
+    uint32_t required_fault_rule_mask;
+    uint32_t required_event_flags;
+    uint32_t required_log_code_mask;
+    uint32_t required_stale_source_mask;
+    uint32_t required_duplicate_source_mask;
+    uint32_t required_out_of_order_source_mask;
+    uint32_t required_nonfinite_source_mask;
+    uint32_t required_invalid_source_mask;
+    uint8_t require_estimator_degraded;
+    uint8_t require_estimator_recovered;
+    uint8_t require_target_unavailable;
+    uint8_t require_target_recovered;
+    uint8_t require_home_unavailable;
+    uint8_t require_home_recovered;
+} ScenarioExpectations;
 
 typedef struct {
     ScenarioKind kind;
@@ -52,6 +85,7 @@ typedef struct {
     ImpactFusionConfig impact_fusion;
     ImpactRecoveryConfig recovery;
     SafetyConfig safety;
+    NavRuntimeHealthConfig health;
     PosCtrlParams ctrl;
     SimParams dynamics;
     TerminalParams terminal;
@@ -88,6 +122,8 @@ typedef struct {
     float home_loss_end_s;
     uint8_t other_agent_enabled;
     AgentState other_agent;
+    SimFaultPlan fault_plan;
+    ScenarioExpectations expectations;
 } Scenario;
 
 void scenario_default(Scenario *scenario);

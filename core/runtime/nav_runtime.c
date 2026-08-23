@@ -3,6 +3,7 @@
 #include "nav_runtime.h"
 
 #define NAV_SWARM_FUTURE_POINT_COUNT 8u
+#define NAV_TIMESTAMP_HALF_RANGE 0x80000000u
 
 static uint8_t positive_finite(float value)
 {
@@ -44,6 +45,176 @@ static uint8_t route_valid(const WaypointQueue *route)
         }
     }
     return 1u;
+}
+
+static uint8_t quaternion_finite(Quatf attitude)
+{
+    return (nav_isfinite(attitude.w) && nav_isfinite(attitude.x) &&
+            nav_isfinite(attitude.y) && nav_isfinite(attitude.z)) ? 1u : 0u;
+}
+
+static uint8_t flow_frame_finite(const FlowFrame *frame)
+{
+    uint8_t index;
+    if (frame->count > VF_MAX_FEATURES) return 0u;
+    for (index = 0u; index < frame->count; index++) {
+        if (!nav_isfinite(frame->feats[index].u) ||
+            !nav_isfinite(frame->feats[index].v)) {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
+static uint8_t odometry_finite(const OdomSample *odometry)
+{
+    if (!odometry->valid) return 1u;
+    return (vec3_is_finite(odometry->pos) && vec3_is_finite(odometry->vel) &&
+            nav_isfinite(odometry->yaw) && nav_isfinite(odometry->yaw_rate) &&
+            quaternion_finite(odometry->att)) ? 1u : 0u;
+}
+
+static uint8_t pixel_observation_finite(const PixelObs *pixel)
+{
+    if (!pixel->visible) return 1u;
+    return (nav_isfinite(pixel->u) && nav_isfinite(pixel->v) &&
+            positive_finite(pixel->size_px)) ? 1u : 0u;
+}
+
+static uint8_t source_index(uint32_t source_mask)
+{
+    switch (source_mask) {
+    case NAV_INPUT_SOURCE_IMU: return 0u;
+    case NAV_INPUT_SOURCE_FLOW: return 1u;
+    case NAV_INPUT_SOURCE_ODOMETRY: return 2u;
+    case NAV_INPUT_SOURCE_TARGET: return 3u;
+    case NAV_INPUT_SOURCE_HOME: return 4u;
+    default: return 0u;
+    }
+}
+
+static void log_input_fault(NavRuntime *runtime, uint32_t now_ms,
+                            NavLogEventCode code, uint32_t source_mask,
+                            uint32_t magnitude, uint32_t *event_flags)
+{
+    nav_event_log_push(&runtime->event_log, now_ms, code, source_mask,
+                       (float)magnitude);
+    *event_flags |= NAV_EVENT_INPUT_REJECTED;
+}
+
+static uint8_t source_timestamp_valid(NavRuntime *runtime,
+                                      uint32_t source_mask,
+                                      uint32_t sample_timestamp_ms,
+                                      uint32_t now_ms,
+                                      uint32_t max_age_ms,
+                                      NavRuntimeHealth *health,
+                                      uint32_t *event_flags)
+{
+    uint8_t index = source_index(source_mask);
+    uint8_t valid = 1u;
+    uint32_t age = now_ms - sample_timestamp_ms;
+
+    if (age < NAV_TIMESTAMP_HALF_RANGE) {
+        if (age > max_age_ms) {
+            health->stale_source_mask |= source_mask;
+            log_input_fault(runtime, now_ms, NAV_LOG_INPUT_STALE,
+                            source_mask, age, event_flags);
+            valid = 0u;
+        }
+    } else {
+        uint32_t future = sample_timestamp_ms - now_ms;
+        if (future > runtime->cfg.health.future_tolerance_ms) {
+            health->out_of_order_source_mask |= source_mask;
+            log_input_fault(runtime, now_ms, NAV_LOG_INPUT_OUT_OF_ORDER,
+                            source_mask, future, event_flags);
+            valid = 0u;
+        }
+    }
+
+    if ((runtime->source_seen_mask & source_mask) != 0u) {
+        uint32_t advance = sample_timestamp_ms -
+                           runtime->last_source_timestamp_ms[index];
+        if (advance == 0u) {
+            health->duplicate_source_mask |= source_mask;
+            log_input_fault(runtime, now_ms, NAV_LOG_INPUT_DUPLICATE,
+                            source_mask, 0u, event_flags);
+            valid = 0u;
+        } else if (advance >= NAV_TIMESTAMP_HALF_RANGE) {
+            health->out_of_order_source_mask |= source_mask;
+            log_input_fault(runtime, now_ms, NAV_LOG_INPUT_OUT_OF_ORDER,
+                            source_mask, advance, event_flags);
+            valid = 0u;
+        }
+    }
+
+    if (valid) {
+        runtime->source_seen_mask |= source_mask;
+        runtime->last_source_timestamp_ms[index] = sample_timestamp_ms;
+    }
+    return valid;
+}
+
+static void mark_nonfinite(NavRuntime *runtime, uint32_t now_ms,
+                           uint32_t source_mask, NavRuntimeHealth *health,
+                           uint32_t *event_flags)
+{
+    health->nonfinite_source_mask |= source_mask;
+    log_input_fault(runtime, now_ms, NAV_LOG_INPUT_NONFINITE,
+                    source_mask, 0u, event_flags);
+}
+
+static void mark_invalid(NavRuntime *runtime, uint32_t now_ms,
+                         uint32_t source_mask, NavRuntimeHealth *health,
+                         uint32_t *event_flags)
+{
+    health->invalid_source_mask |= source_mask;
+    log_input_fault(runtime, now_ms, NAV_LOG_INPUT_INVALID,
+                    source_mask, 0u, event_flags);
+}
+
+static void watchdog_update(NavRuntime *runtime, uint32_t now_ms,
+                            NavRuntimeHealth *health, uint32_t *event_flags)
+{
+    if (runtime->update_timestamp_seen) {
+        uint32_t gap = now_ms - runtime->last_update_timestamp_ms;
+        health->cycle_gap_ms = gap;
+        if (gap == 0u || gap >= NAV_TIMESTAMP_HALF_RANGE) {
+            if (!runtime->watchdog_tripped) {
+                nav_event_log_push(&runtime->event_log, now_ms,
+                                   NAV_LOG_WATCHDOG_TRIPPED, gap, (float)gap);
+            }
+            runtime->watchdog_tripped = 1u;
+            *event_flags |= NAV_EVENT_WATCHDOG_TRIPPED;
+        } else {
+            runtime->last_update_timestamp_ms = now_ms;
+            if (gap > runtime->cfg.health.max_cycle_gap_ms) {
+                if (runtime->watchdog_overruns < 255u) {
+                    runtime->watchdog_overruns++;
+                }
+                nav_event_log_push(&runtime->event_log, now_ms,
+                                   NAV_LOG_WATCHDOG_OVERRUN, gap, (float)gap);
+                *event_flags |= NAV_EVENT_WATCHDOG_OVERRUN;
+                if (runtime->watchdog_overruns >=
+                    runtime->cfg.health.watchdog_trip_after_overruns) {
+                    if (!runtime->watchdog_tripped) {
+                        nav_event_log_push(&runtime->event_log, now_ms,
+                                           NAV_LOG_WATCHDOG_TRIPPED,
+                                           runtime->watchdog_overruns,
+                                           (float)gap);
+                    }
+                    runtime->watchdog_tripped = 1u;
+                    *event_flags |= NAV_EVENT_WATCHDOG_TRIPPED;
+                }
+            } else {
+                runtime->watchdog_overruns = 0u;
+            }
+        }
+    } else {
+        runtime->last_update_timestamp_ms = now_ms;
+        runtime->update_timestamp_seen = 1u;
+    }
+    health->consecutive_overruns = runtime->watchdog_overruns;
+    health->watchdog_tripped = runtime->watchdog_tripped;
 }
 
 static TrajectoryPlanReport trajectory_report_empty(void)
@@ -222,6 +393,13 @@ void nav_runtime_config_default(NavRuntimeConfig *cfg)
     cfg->home_yaw_rad = 0.0f;
     cfg->relocalization_cooldown_s = 1.0f;
     cfg->relocalization_min_correction_m = 0.05f;
+    cfg->health.imu_max_age_ms = 30u;
+    cfg->health.flow_max_age_ms = 150u;
+    cfg->health.odometry_max_age_ms = 150u;
+    cfg->health.vision_max_age_ms = 250u;
+    cfg->health.future_tolerance_ms = 5u;
+    cfg->health.max_cycle_gap_ms = 50u;
+    cfg->health.watchdog_trip_after_overruns = 2u;
     cfg->self_agent_id = 2u;
 }
 
@@ -239,7 +417,15 @@ uint32_t nav_runtime_config_validate(const NavRuntimeConfig *cfg)
         !positive_finite(cfg->target_filter_cutoff_hz) ||
         !positive_finite(cfg->home_filter_cutoff_hz) ||
         !nonnegative_finite(cfg->relocalization_cooldown_s) ||
-        !nonnegative_finite(cfg->relocalization_min_correction_m)) {
+        !nonnegative_finite(cfg->relocalization_min_correction_m) ||
+        cfg->health.imu_max_age_ms == 0u ||
+        cfg->health.flow_max_age_ms == 0u ||
+        cfg->health.odometry_max_age_ms == 0u ||
+        cfg->health.vision_max_age_ms == 0u ||
+        cfg->health.max_cycle_gap_ms == 0u ||
+        (float)cfg->health.max_cycle_gap_ms < 1000.0f * cfg->nominal_dt_s ||
+        cfg->health.future_tolerance_ms > cfg->health.max_cycle_gap_ms ||
+        cfg->health.watchdog_trip_after_overruns == 0u) {
         errors |= NAV_CONFIG_ERROR_TIMING;
     }
     if (!positive_finite(mission->takeoff_alt_m) ||
@@ -394,6 +580,9 @@ uint32_t nav_runtime_init(NavRuntime *runtime, const NavRuntimeConfig *cfg)
     if (errors != NAV_CONFIG_ERROR_NONE) return errors;
 
     runtime->cfg = *cfg;
+    nav_event_log_init(&runtime->event_log);
+    nav_event_log_push(&runtime->event_log, 0u, NAV_LOG_RUNTIME_STARTED,
+                       0u, 0.0f);
     estimator_init(&runtime->estimator, &cfg->estimator);
     impact_detector_init(&runtime->impact_detector, &cfg->impact);
     impact_detector_configure_fusion(&runtime->impact_detector, &cfg->impact_fusion);
@@ -428,6 +617,10 @@ uint32_t nav_runtime_init(NavRuntime *runtime, const NavRuntimeConfig *cfg)
 uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
 {
     const NavRuntimeConfig *cfg;
+    const FlowFrame *flow_sample = 0;
+    const OdomSample *odometry_sample = 0;
+    const PixelObs *target_pixel = 0;
+    const PixelObs *home_pixel = 0;
     OdomSample odometry;
     TargetObs target_observation;
     HomeObs home_observation;
@@ -438,13 +631,13 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     SafetyDecision safety_decision;
     MissionInput mission_input;
     GuidanceOutput guidance;
+    NavRuntimeHealth health;
     CollisionRiskLevel combined_collision_risk;
     uint32_t event_flags = NAV_EVENT_NONE;
     uint32_t time_ms;
     float dt;
 
-    if (runtime == 0 || !runtime->initialized || input == 0 || input->imu == 0 ||
-        !positive_finite(input->dt) || input->dt > 0.2f) {
+    if (runtime == 0 || !runtime->initialized || input == 0) {
         if (runtime != 0) {
             runtime->output.armed = 0u;
             runtime->output.step_valid = 0u;
@@ -454,9 +647,99 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         return 0u;
     }
     cfg = &runtime->cfg;
-    dt = input->dt;
     time_ms = input->timestamp_ms != 0u
-        ? input->timestamp_ms : input->imu->timestamp_ms;
+        ? input->timestamp_ms
+        : (input->imu != 0 ? input->imu->timestamp_ms : 0u);
+    memset(&health, 0, sizeof(health));
+    watchdog_update(runtime, time_ms, &health, &event_flags);
+    if (!positive_finite(input->dt) || input->dt > 0.2f) {
+        if (!runtime->watchdog_tripped) {
+            nav_event_log_push(&runtime->event_log, time_ms,
+                               NAV_LOG_WATCHDOG_TRIPPED, 0u, input->dt);
+        }
+        runtime->watchdog_tripped = 1u;
+        health.watchdog_tripped = 1u;
+        event_flags |= NAV_EVENT_WATCHDOG_TRIPPED;
+        runtime->output.health = health;
+        runtime->output.event_flags = event_flags;
+        runtime->output.armed = 0u;
+        runtime->output.step_valid = 0u;
+        runtime->output.control.accel_cmd = vec3_zero();
+        runtime->output.control.yaw_rate_cmd = 0.0f;
+        return 0u;
+    }
+    dt = input->dt;
+
+    if (input->imu == 0) {
+        health.stale_source_mask |= NAV_INPUT_SOURCE_IMU;
+        log_input_fault(runtime, time_ms, NAV_LOG_INPUT_STALE,
+                        NAV_INPUT_SOURCE_IMU, 0u, &event_flags);
+    } else {
+        uint8_t imu_valid = source_timestamp_valid(runtime,
+            NAV_INPUT_SOURCE_IMU, input->imu->timestamp_ms, time_ms,
+            cfg->health.imu_max_age_ms, &health, &event_flags);
+        if (!vec3_is_finite(input->imu->accel) ||
+            !vec3_is_finite(input->imu->gyro)) {
+            mark_nonfinite(runtime, time_ms, NAV_INPUT_SOURCE_IMU,
+                           &health, &event_flags);
+            imu_valid = 0u;
+        }
+        health.required_input_valid = imu_valid;
+    }
+    if (!health.required_input_valid) {
+        runtime->output.health = health;
+        runtime->output.event_flags = event_flags;
+        runtime->output.armed = 0u;
+        runtime->output.step_valid = 0u;
+        runtime->output.control.accel_cmd = vec3_zero();
+        runtime->output.control.yaw_rate_cmd = 0.0f;
+        return 0u;
+    }
+
+    if (input->flow != 0 &&
+        source_timestamp_valid(runtime, NAV_INPUT_SOURCE_FLOW,
+            input->flow->timestamp_ms, time_ms, cfg->health.flow_max_age_ms,
+            &health, &event_flags)) {
+        if (flow_frame_finite(input->flow)) {
+            flow_sample = input->flow;
+        } else {
+            mark_nonfinite(runtime, time_ms, NAV_INPUT_SOURCE_FLOW,
+                           &health, &event_flags);
+        }
+    }
+    if (input->odometry != 0 &&
+        source_timestamp_valid(runtime, NAV_INPUT_SOURCE_ODOMETRY,
+            input->odometry->timestamp_ms, time_ms,
+            cfg->health.odometry_max_age_ms, &health, &event_flags)) {
+        if (odometry_finite(input->odometry)) {
+            odometry_sample = input->odometry;
+        } else {
+            mark_nonfinite(runtime, time_ms, NAV_INPUT_SOURCE_ODOMETRY,
+                           &health, &event_flags);
+        }
+    }
+    if (input->target_pixel != 0 &&
+        source_timestamp_valid(runtime, NAV_INPUT_SOURCE_TARGET,
+            input->target_pixel->timestamp_ms, time_ms,
+            cfg->health.vision_max_age_ms, &health, &event_flags)) {
+        if (pixel_observation_finite(input->target_pixel)) {
+            target_pixel = input->target_pixel;
+        } else {
+            mark_invalid(runtime, time_ms, NAV_INPUT_SOURCE_TARGET,
+                         &health, &event_flags);
+        }
+    }
+    if (input->home_pixel != 0 &&
+        source_timestamp_valid(runtime, NAV_INPUT_SOURCE_HOME,
+            input->home_pixel->timestamp_ms, time_ms,
+            cfg->health.vision_max_age_ms, &health, &event_flags)) {
+        if (pixel_observation_finite(input->home_pixel)) {
+            home_pixel = input->home_pixel;
+        } else {
+            mark_invalid(runtime, time_ms, NAV_INPUT_SOURCE_HOME,
+                         &health, &event_flags);
+        }
+    }
 
     odometry.pos = vec3_zero();
     odometry.vel = vec3_zero();
@@ -465,11 +748,11 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     odometry.att = runtime->estimator.out.att;
     odometry.valid = 0u;
     odometry.timestamp_ms = time_ms;
-    if (input->flow != 0) {
-        vf_update(&runtime->vision_frontend, input->flow, input->imu->gyro,
+    if (flow_sample != 0) {
+        vf_update(&runtime->vision_frontend, flow_sample, input->imu->gyro,
                   runtime->estimator.out.att, input->tof_height, dt, &odometry);
-    } else if (input->odometry != 0) {
-        odometry = *input->odometry;
+    } else if (odometry_sample != 0) {
+        odometry = *odometry_sample;
     }
     estimator_update(&runtime->estimator, input->imu, &odometry,
                      input->tof_height, dt);
@@ -483,31 +766,34 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         estimator_notify_impact(&runtime->estimator);
         impact_recovery_start(&runtime->recovery, &runtime->estimator.out);
         event_flags |= NAV_EVENT_IMPACT_CONFIRMED;
+        nav_event_log_push(&runtime->event_log, time_ms,
+                           NAV_LOG_IMPACT_CONFIRMED, 0u,
+                           impact_report.confidence);
     }
 
     target_observation.visible =
-        (input->target_pixel != 0) ? input->target_pixel->visible : 0u;
+        (target_pixel != 0) ? target_pixel->visible : 0u;
     target_observation.timestamp_ms = target_observation.visible &&
-        input->target_pixel->timestamp_ms != 0u
-        ? input->target_pixel->timestamp_ms : time_ms;
+        target_pixel->timestamp_ms != 0u
+        ? target_pixel->timestamp_ms : time_ms;
     target_observation.confidence = target_observation.visible ? 1.0f : 0.0f;
     target_observation.rel_pos = target_observation.visible
-        ? camera_reconstruct_nav(&cfg->cam_forward, input->target_pixel->u,
-            input->target_pixel->v, input->target_pixel->size_px,
+        ? camera_reconstruct_nav(&cfg->cam_forward, target_pixel->u,
+            target_pixel->v, target_pixel->size_px,
             cfg->target_size_m, runtime->estimator.out.att)
         : vec3_zero();
     target_observation.bearing = vec3_normalize_or(target_observation.rel_pos,
                                                    vec3(1.0f, 0.0f, 0.0f));
 
     home_observation.visible =
-        (input->home_pixel != 0) ? input->home_pixel->visible : 0u;
+        (home_pixel != 0) ? home_pixel->visible : 0u;
     home_observation.timestamp_ms = home_observation.visible &&
-        input->home_pixel->timestamp_ms != 0u
-        ? input->home_pixel->timestamp_ms : time_ms;
+        home_pixel->timestamp_ms != 0u
+        ? home_pixel->timestamp_ms : time_ms;
     home_observation.confidence = home_observation.visible ? 1.0f : 0.0f;
     home_observation.rel_pos = home_observation.visible
-        ? camera_reconstruct_nav(&cfg->cam_down, input->home_pixel->u,
-            input->home_pixel->v, input->home_pixel->size_px,
+        ? camera_reconstruct_nav(&cfg->cam_down, home_pixel->u,
+            home_pixel->v, home_pixel->size_px,
             cfg->marker_size_m, runtime->estimator.out.att)
         : vec3_zero();
     home_observation.relative_yaw = home_observation.visible
@@ -519,11 +805,13 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     if (home_observation.visible &&
         (!runtime->relocalization_seen ||
          (uint32_t)(time_ms - runtime->last_relocalization_ms) >=
-            (uint32_t)(1000.0f * cfg->relocalization_cooldown_s))) {
+        (uint32_t)(1000.0f * cfg->relocalization_cooldown_s))) {
         NavState absolute_reference = runtime->estimator.out;
+        float correction_distance;
         absolute_reference.pos = vec3_sub(cfg->home_pos, home_observation.rel_pos);
-        if (vec3_dist(absolute_reference.pos, runtime->estimator.out.pos) >=
-                cfg->relocalization_min_correction_m ||
+        correction_distance = vec3_dist(absolute_reference.pos,
+                                        runtime->estimator.out.pos);
+        if (correction_distance >= cfg->relocalization_min_correction_m ||
             runtime->estimator.out.status != EST_TRACKING) {
             estimator_notify_relocalized(&runtime->estimator, &absolute_reference);
             vf_set_pose(&runtime->vision_frontend, absolute_reference.pos,
@@ -531,6 +819,9 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
             runtime->last_relocalization_ms = time_ms;
             runtime->relocalization_seen = 1u;
             event_flags |= NAV_EVENT_RELOCALIZED;
+            nav_event_log_push(&runtime->event_log, time_ms,
+                               NAV_LOG_RELOCALIZED, 0u,
+                               correction_distance);
         }
     }
 
@@ -549,6 +840,12 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         runtime->estimator.out.vel, &runtime->obstacles);
     if (obstacle_report.level != COLLISION_RISK_NONE) {
         event_flags |= NAV_EVENT_OBSTACLE_RISK;
+        if (runtime->output.obstacle.level == COLLISION_RISK_NONE) {
+            nav_event_log_push(&runtime->event_log, time_ms,
+                               NAV_LOG_OBSTACLE_RISK,
+                               obstacle_report.obstacle_id,
+                               obstacle_report.minimum_separation_m);
+        }
     }
 
     {
@@ -584,7 +881,15 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         swarm_report = collision_check(&collision_cfg, future_points,
             NAV_SWARM_FUTURE_POINT_COUNT, &runtime->swarm);
     }
-    if (swarm_report.conflict) event_flags |= NAV_EVENT_SWARM_CONFLICT;
+    if (swarm_report.conflict) {
+        event_flags |= NAV_EVENT_SWARM_CONFLICT;
+        if (!runtime->output.swarm_collision.conflict) {
+            nav_event_log_push(&runtime->event_log, time_ms,
+                               NAV_LOG_SWARM_CONFLICT,
+                               swarm_report.other_agent_id,
+                               swarm_report.min_separation);
+        }
+    }
 
     combined_collision_risk = obstacle_report.level;
     if (swarm_report.risk == SWARM_RISK_CRITICAL) {
@@ -621,7 +926,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         !input->request_emergency) {
         mission_input.emergency_requested = 0u;
     }
-    mission_input.nav_failure = 0u;
+    mission_input.nav_failure = runtime->watchdog_tripped;
     mission_input.geofence_violation = runtime->safety.geofence_violation;
     mission_input.recovery_managed =
         (runtime->recovery.stage != RECOVERY_IDLE) ? 1u : 0u;
@@ -635,6 +940,15 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     mission_input.dt = dt;
     mission_fsm_update(&runtime->mission, &mission_input,
                        &runtime->mission_output);
+
+    if (runtime->mission_output.state_changed) {
+        uint32_t transition =
+            ((uint32_t)runtime->output.mission.state << 8) |
+            (uint32_t)runtime->mission_output.state;
+        nav_event_log_push(&runtime->event_log, time_ms,
+                           NAV_LOG_MISSION_TRANSITION, transition,
+                           runtime->mission.state_time);
+    }
 
     if (runtime->mission_output.state_changed &&
         (runtime->mission_output.state == MS_TARGET_ACQUIRE ||
@@ -671,6 +985,10 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
             runtime->trajectory_valid = runtime->trajectory_report.valid;
             if (runtime->trajectory_report.detour_used) {
                 event_flags |= NAV_EVENT_TRAJECTORY_DETOUR;
+                nav_event_log_push(&runtime->event_log, time_ms,
+                                   NAV_LOG_TRAJECTORY_DETOUR,
+                                   runtime->trajectory_report.iterations,
+                                   runtime->trajectory.duration);
             }
             if (!runtime->trajectory_report.valid &&
                 (runtime->trajectory_report.check.flags &
@@ -681,6 +999,10 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
                 runtime->trajectory_valid = 1u;
             } else if (!runtime->trajectory_report.valid) {
                 event_flags |= NAV_EVENT_TRAJECTORY_INVALID;
+                nav_event_log_push(&runtime->event_log, time_ms,
+                                   NAV_LOG_TRAJECTORY_INVALID,
+                                   runtime->trajectory_report.check.flags,
+                                   runtime->trajectory_report.check.checked_duration_s);
             }
         }
         if (runtime->trajectory_active) {
@@ -753,6 +1075,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     runtime->output.guidance = guidance;
     runtime->output.control = runtime->previous_control;
     runtime->output.swarm_self = runtime->swarm.self;
+    runtime->output.health = health;
     runtime->output.event_flags = event_flags;
     runtime->output.recovery_active = runtime->recovery.active;
     runtime->output.trajectory_active = runtime->trajectory_active;
@@ -763,4 +1086,9 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
          runtime->mission_output.state != MS_DOCKED) ? 1u : 0u;
     runtime->output.step_valid = 1u;
     return 1u;
+}
+
+const NavEventLog *nav_runtime_event_log(const NavRuntime *runtime)
+{
+    return runtime != 0 ? &runtime->event_log : 0;
 }
