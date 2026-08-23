@@ -67,3 +67,6 @@ int nav_swarm_frame_write(const uint8_t *frame, uint16_t size);
 `NavApp.swarm_decode_errors` 和 `NavApp.swarm_tx_drops` 提供链路诊断计数，邻机表内
 还有更细的接收统计。实机接入后仍需测量无线链路吞吐、端到端延迟、突发丢包、
 干扰下的可用距离以及多机同时广播时的信道占用。
+
+无实物阶段可使用[确定性多机网络仿真](swarm_simulation.md)，让多个独立 `NavRuntime`
+通过本协议完成正常、有损、失联和四机容量回归；其中的故障参数只用于软件验证，不能替代实测链路指标。

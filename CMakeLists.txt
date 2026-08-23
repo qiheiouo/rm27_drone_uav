@@ -54,6 +54,7 @@ add_library(nav_sim STATIC
     simulation/sim_dynamics.c
     simulation/sim_sensors.c
     simulation/sim_vision.c
+    simulation/swarm_network.c
 )
 
 target_include_directories(nav_core PUBLIC
@@ -88,6 +89,9 @@ endif()
 add_executable(mission_sim platform/host/main.c)
 target_link_libraries(mission_sim PRIVATE nav_sim)
 
+add_executable(swarm_sim platform/host/swarm_sim.c)
+target_link_libraries(swarm_sim PRIVATE nav_sim)
+
 add_executable(nav_replay platform/host/replay.c)
 target_link_libraries(nav_replay PRIVATE nav_core)
 
@@ -114,6 +118,7 @@ foreach(t
     test_planner_avoidance
     test_swarm
     test_swarm_link
+    test_swarm_network
     test_nav_runtime
     test_diagnostics
     test_fault_injection
@@ -121,6 +126,17 @@ foreach(t
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE nav_core nav_sim)
     add_test(NAME ${t} COMMAND ${t})
+endforeach()
+
+foreach(scenario
+    nominal
+    lossy
+    outage
+    four-agent
+)
+    add_test(NAME swarm_${scenario} COMMAND swarm_sim --scenario ${scenario})
+    set_tests_properties(swarm_${scenario} PROPERTIES
+        PASS_REGULAR_EXPRESSION "SWARM_SIM_SUCCESS")
 endforeach()
 
 add_executable(test_nav_app_swarm tests/test_nav_app_swarm.c)

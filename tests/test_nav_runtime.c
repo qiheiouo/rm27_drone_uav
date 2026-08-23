@@ -103,6 +103,7 @@ int main(void)
     nav_runtime_config_default(&cfg);
     cfg.estimator.mode = EST_MODE_TRUTH;
     cfg.safety.collision_critical_timeout_s = 0.02f;
+    cfg.swarm_avoidance.mode = SWARM_ENABLED;
     CHECK(nav_runtime_init(&runtime, &cfg) == NAV_CONFIG_ERROR_NONE);
     runtime.mission.state = MS_OUTBOUND;
     swarm_view_init(&swarm, cfg.self_agent_id);
@@ -121,6 +122,8 @@ int main(void)
     input.timestamp_ms = imu.timestamp_ms;
     CHECK(nav_runtime_step(&runtime, &input) == 1u);
     CHECK(runtime.output.swarm_collision.risk == SWARM_RISK_CRITICAL);
+    CHECK(runtime.output.swarm_avoidance.active == 1u);
+    CHECK(runtime.output.swarm_avoidance.yielding == 1u);
     CHECK((runtime.output.safety.reason_mask & SAFETY_REASON_COLLISION) != 0u);
     CHECK(runtime.output.safety.request_emergency == 1u);
     CHECK(runtime.output.mission.state == MS_EMERGENCY_STABILIZE);
