@@ -33,6 +33,15 @@ cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
 
+提交或合并前建议运行统一质量门禁；它还会检查构建产物误提交、本机绝对路径和
+编译器警告：
+
+```powershell
+cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cmake
+```
+
+本机与 Gitee 流水线接入方法见 [持续集成质量门禁](docs/quality_gate.md)。
+
 `build/` 是约定的本机构建目录，`build*/` 均已被 Git 忽略，可在切换机器、生成器或源码路径后安全删除并重新生成。不要复制或提交 CMake 缓存和编译产物。
 
 默认仿真：

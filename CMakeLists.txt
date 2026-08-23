@@ -4,6 +4,20 @@ project(rm_drone_nav C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+option(NAV_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+if(MSVC)
+    add_compile_options(/W4)
+    if(NAV_WARNINGS_AS_ERRORS)
+        add_compile_options(/WX)
+    endif()
+else()
+    add_compile_options(-Wall -Wextra)
+    if(NAV_WARNINGS_AS_ERRORS)
+        add_compile_options(-Werror)
+    endif()
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -64,14 +78,6 @@ target_include_directories(nav_core PUBLIC
 
 target_include_directories(nav_sim PUBLIC simulation)
 target_link_libraries(nav_sim PUBLIC nav_core)
-
-if(MSVC)
-    target_compile_options(nav_core PRIVATE /W4)
-    target_compile_options(nav_sim PRIVATE /W4)
-else()
-    target_compile_options(nav_core PRIVATE -Wall -Wextra)
-    target_compile_options(nav_sim PRIVATE -Wall -Wextra)
-endif()
 
 if(UNIX)
     target_link_libraries(nav_core PUBLIC m)
