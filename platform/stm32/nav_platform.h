@@ -16,6 +16,7 @@
 #include "collision_interface.h"
 #include "nav_telemetry.h"
 #include "fcu_bridge.h"
+#include "swarm_link.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,12 +44,16 @@ int nav_flow_read(FlowFrame *out);
 int nav_camera_target_read(PixelObs *out);
 int nav_camera_home_read(PixelObs *out);
 int nav_local_obstacles_read(DynamicObstacleSet *out);
-int nav_swarm_view_read(SwarmView *out);
 int nav_mission_command_read(NavMissionCommand *out);
 int nav_dock_status_read(NavDockStatus *out);
 
-/* Optional peer broadcast; use a timestamped AgentState on the wire. */
-void nav_swarm_state_send(const AgentState *self);
+/*
+ * Optional non-blocking swarm transport. Read returns 0 after copying one
+ * complete frame, or negative when no frame is available. Write returns 0
+ * when the frame was copied/enqueued, or negative when unavailable/full.
+ */
+int nav_swarm_frame_read(uint8_t *frame, uint16_t capacity, uint16_t *size);
+int nav_swarm_frame_write(const uint8_t *frame, uint16_t size);
 
 /*
  * Protocol-neutral FCU command. A board adapter maps this envelope to the

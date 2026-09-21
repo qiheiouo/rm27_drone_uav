@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include "nav_runtime.h"
+#include "swarm_link.h"
 
 #ifndef NAV_APP_TELEMETRY_PERIOD_STEPS
 #define NAV_APP_TELEMETRY_PERIOD_STEPS 10u
@@ -11,6 +12,14 @@
 
 #ifndef NAV_APP_FCU_COMMAND_VALIDITY_MS
 #define NAV_APP_FCU_COMMAND_VALIDITY_MS 100u
+#endif
+
+#ifndef NAV_APP_SWARM_RX_BUDGET
+#define NAV_APP_SWARM_RX_BUDGET 4u
+#endif
+
+#ifndef NAV_APP_SWARM_TX_PERIOD_STEPS
+#define NAV_APP_SWARM_TX_PERIOD_STEPS 5u
 #endif
 
 #ifdef __cplusplus
@@ -27,6 +36,11 @@ typedef struct {
     uint32_t telemetry_step_count;
     uint32_t fcu_tx_drops;
     uint16_t fcu_command_sequence;
+    SwarmPeerRegistry swarm_peers;
+    uint32_t swarm_decode_errors;
+    uint32_t swarm_tx_drops;
+    uint32_t swarm_tx_step_count;
+    uint16_t swarm_tx_sequence;
 } NavApp;
 
 /* Returns the configuration error mask; zero means initialization succeeded. */

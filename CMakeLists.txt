@@ -45,6 +45,7 @@ add_library(nav_core STATIC
     flight/fcu_bridge/fcu_bridge.c
     swarm/collision_interface/collision_interface.c
     swarm/collision_interface/swarm_avoidance.c
+    swarm/link/swarm_link.c
     swarm/trajectory_message/trajectory_message.c
 )
 
@@ -74,6 +75,7 @@ target_include_directories(nav_core PUBLIC
     flight/fcu_bridge
     flight/flight_state
     swarm/agent_state
+    swarm/link
     swarm/trajectory_message
     swarm/collision_interface
 )
@@ -116,6 +118,7 @@ foreach(t
     test_recovery_safety
     test_planner_avoidance
     test_swarm
+    test_swarm_link
     test_nav_runtime
     test_diagnostics
     test_fault_injection
@@ -133,6 +136,10 @@ set_tests_properties(fcu_bridge_uart_outage PROPERTIES
 add_executable(test_nav_app_fcu tests/test_nav_app_fcu.c)
 target_link_libraries(test_nav_app_fcu PRIVATE nav_stm32_port nav_core)
 add_test(NAME test_nav_app_fcu COMMAND test_nav_app_fcu)
+
+add_executable(test_nav_app_swarm tests/test_nav_app_swarm.c)
+target_link_libraries(test_nav_app_swarm PRIVATE nav_stm32_port nav_core)
+add_test(NAME test_nav_app_swarm COMMAND test_nav_app_swarm)
 
 foreach(scenario
     flow-dropout

@@ -16,8 +16,8 @@
 | 轨迹规划 | 固定容量五次多项式轨迹；速度、加速度、时长、工作空间和碰撞后检查；有界时间拉伸；固定内存局部绕行和简单制导兜底 |
 | 安全管理 | 软/硬任务截止时间、围栏、估计器质量、轨迹有效性、控制饱和和碰撞风险分级；短时风险去抖 |
 | 动态障碍 | 最多 8 个局部/动态障碍，最近接预测、横向避让和紧急爬升输出 |
-| 多机扩展 | 最多 4 个他机状态、带时间戳未来轨迹消息、超时处理、未来冲突检测，以及按 `agent_id` 确定性让行；默认可关闭 |
-| 双 MCU/STM32 对接 | 主机与 STM32 共用 `NavRuntime`；固定内存 FCU 状态/指令契约、速度优先与加速度回退、序号/CRC/超时保护和确定性 UART 断线回归 |
+| 多机扩展 | 固定 48 字节版本化状态帧、CRC、重复/乱序/超时邻机表，最多 4 个他机状态、带时间戳未来轨迹消息、未来冲突检测及按 `agent_id` 确定性让行；默认可关闭 |
+| 双 MCU/STM32 对接 | 主机与 STM32 共用 `NavRuntime`；板级只负责输入输出适配；固定内存 FCU 状态/指令契约、速度优先与加速度回退、序号/CRC/超时保护和确定性 UART 断线回归 |
 | 诊断与回放 | 输入过期/重复/乱序检查、连续周期 watchdog、64 条固定内存事件环、确定性 CSV 回放，以及带版本/CRC 的二进制遥测 |
 | 故障回归 | 固定内存、确定性的传感器丢包/时间戳异常/非有限值/调度超时注入，并校验恢复、拒绝输出和紧急降落结果 |
 
@@ -67,10 +67,11 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 
 退出码：普通任务中，`0` 为任务完成并停靠，`2` 为紧急降落，`3` 为仿真超时，`4` 表示声明的压力分支没有真正触发，`5` 表示共享运行时拒绝无效输入，`6` 表示运行时产生非有限输出，`7` 表示遥测写入、编码或关闭失败。故障回归场景只有在实际结果、诊断掩码和安全动作均符合声明时才返回 `0`，并输出 `FAULT_REGRESSION_SUCCESS`；因此 `imu-stale` 的“安全拒绝”和 `watchdog-overrun` 的“紧急降落”属于测试通过，而不是任务成功。
 
-当前 CTest 共 73 项：
+当前 CTest 数量以构建后的 `ctest -N` 为准，当前合并目标预计为 75 项：
 
-- 17 个模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、遥测编解码、FCU 桥接与 STM32 指令适配）；
+- 模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、遥测编解码、FCU 桥接、集群链路与 STM32 适配）；
 - 1 个双 MCU UART 延迟、损坏和断线回归；
+- 2 个 STM32 适配集成测试（FCU 和集群链路）；
 - 8 个端到端故障回归场景；
 - 4 个遥测录制与逐帧校验集成测试（含运行时拒绝时的故障现场保留）；
 - 1 个默认闭环测试；
@@ -83,6 +84,8 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 故障场景包括 `flow-dropout`、`target-freeze`、`home-delay`、`nan-target`、`imu-stale`、`imu-duplicate`、`imu-rollback` 和 `watchdog-overrun`。完整规则、判定标准与扩展方式见[故障注入与安全回归](docs/fault_injection.md)。
 
 遥测格式、带宽和板级队列约束见[结构化遥测](docs/telemetry.md)。遥测保存运行结果，用于诊断；CSV 回放保存运行输入，用于重现。二者不能互相替代。
+
+集群状态帧、邻机生命周期和板级通信约束见[集群链路协议与邻机表](docs/swarm_link.md)。
 
 ## 目录边界
 
@@ -113,12 +116,10 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 
 - 未实现真实图像中的特征提取、目标分类或 marker 解码；当前接口从像素观测开始。
 - 无稠密地图、一般三维走廊搜索或完整优化规划器；局部绕行只适合少量已知障碍。
-- 多机模式已能验证通信超时、未来冲突和确定性让行，但没有网络协议、时钟同步和实机通信测试。
+- 多机模式已实现状态帧协议、接收时效、未来冲突和确定性让行，但没有时钟同步、未来轨迹上链路、编队/任务分配和实机通信测试。
 - 没有真实电机、电池、气动、接触结构或无线充电模型。
 - 尚未在目标 STM32、传感器和机体上测量 RAM、最坏执行时间与控制稳定裕量。
 - 30 秒预算是仿真安全约束；实机必须根据电池和比赛规则留出更大的返航裕量。
 - FCU 桥接已有协议无关契约和参考字节流，但尚未绑定或验证任何具体飞控固件。
 
-进一步说明见 [架构文档](docs/architecture.md)、[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
-
-如果需要从整体上理解系统，或准备向其他开发者介绍项目，请阅读[系统工作原理与项目讲解指南](docs/system_overview_and_presentation_guide.md)。
+进一步说明见 [架构文档](docs/architecture.md)、[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)、[集群链路](docs/swarm_link.md)、[系统工作原理与项目讲解指南](docs/system_overview_and_presentation_guide.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
