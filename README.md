@@ -132,4 +132,4 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 - 30 秒预算是仿真安全约束；实机必须根据电池和比赛规则留出更大的返航裕量。
 - FCU 桥接已有协议无关契约和参考字节流，但尚未绑定或验证任何具体飞控固件。
 
-进一步说明见 [架构文档](docs/architecture.md)、[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)、[集群链路](docs/swarm_link.md)、[系统工作原理与项目讲解指南](docs/system_overview_and_presentation_guide.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
+进一步说明见 [架构文档](docs/architecture.md)、[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)、[PX4 蓝牙通信验证手册](docs/px4_bluetooth_validation.md)、[集群链路](docs/swarm_link.md)、[系统工作原理与项目讲解指南](docs/system_overview_and_presentation_guide.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
