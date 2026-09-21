@@ -39,10 +39,21 @@ int nav_flow_read(FlowFrame *out) { (void)out; return -1; }
 int nav_camera_target_read(PixelObs *out) { (void)out; return -1; }
 int nav_camera_home_read(PixelObs *out) { (void)out; return -1; }
 int nav_local_obstacles_read(DynamicObstacleSet *out) { (void)out; return -1; }
-int nav_swarm_view_read(SwarmView *out) { (void)out; return -1; }
+int nav_swarm_frame_read(uint8_t *frame, uint16_t capacity, uint16_t *size)
+{
+    (void)frame;
+    (void)capacity;
+    (void)size;
+    return -1;
+}
+int nav_swarm_frame_write(const uint8_t *frame, uint16_t size)
+{
+    (void)frame;
+    (void)size;
+    return -1;
+}
 int nav_mission_command_read(NavMissionCommand *out) { (void)out; return -1; }
 int nav_dock_status_read(NavDockStatus *out) { (void)out; return -1; }
-void nav_swarm_state_send(const AgentState *self) { (void)self; }
 
 int nav_fcu_setpoint_write(const FcuSetpoint *setpoint)
 {

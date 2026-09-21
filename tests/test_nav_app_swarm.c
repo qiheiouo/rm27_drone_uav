@@ -109,9 +109,10 @@ int nav_swarm_frame_write(const uint8_t *frame, uint16_t size)
     return 0;
 }
 
-void nav_fcu_send(const CtrlOutput *cmd)
+int nav_fcu_setpoint_write(const FcuSetpoint *setpoint)
 {
-    (void)cmd;
+    (void)setpoint;
+    return 0;
 }
 
 void nav_fcu_set_armed(uint8_t armed)
