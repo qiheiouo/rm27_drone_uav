@@ -15,6 +15,7 @@
 #include "obstacle_avoidance.h"
 #include "collision_interface.h"
 #include "nav_telemetry.h"
+#include "fcu_bridge.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,8 +50,12 @@ int nav_dock_status_read(NavDockStatus *out);
 /* Optional peer broadcast; use a timestamped AgentState on the wire. */
 void nav_swarm_state_send(const AgentState *self);
 
-/* Desired acceleration and yaw rate passed to the existing flight controller. */
-void nav_fcu_send(const CtrlOutput *cmd);
+/*
+ * Protocol-neutral FCU command. A board adapter maps this envelope to the
+ * selected flight stack (for example MAVLink velocity setpoints). It must
+ * copy/enqueue the command before returning and must never block.
+ */
+int nav_fcu_setpoint_write(const FcuSetpoint *setpoint);
 void nav_fcu_set_armed(uint8_t armed);
 void nav_log(const char *msg);
 

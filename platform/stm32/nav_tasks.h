@@ -9,6 +9,10 @@
 #define NAV_APP_TELEMETRY_PERIOD_STEPS 10u
 #endif
 
+#ifndef NAV_APP_FCU_COMMAND_VALIDITY_MS
+#define NAV_APP_FCU_COMMAND_VALIDITY_MS 100u
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,6 +25,8 @@ typedef struct {
     uint32_t next_log_sequence;
     uint32_t telemetry_sequence;
     uint32_t telemetry_step_count;
+    uint32_t fcu_tx_drops;
+    uint16_t fcu_command_sequence;
 } NavApp;
 
 /* Returns the configuration error mask; zero means initialization succeeded. */

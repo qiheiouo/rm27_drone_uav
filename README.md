@@ -17,7 +17,7 @@
 | 安全管理 | 软/硬任务截止时间、围栏、估计器质量、轨迹有效性、控制饱和和碰撞风险分级；短时风险去抖 |
 | 动态障碍 | 最多 8 个局部/动态障碍，最近接预测、横向避让和紧急爬升输出 |
 | 多机扩展 | 最多 4 个他机状态、带时间戳未来轨迹消息、超时处理、未来冲突检测，以及按 `agent_id` 确定性让行；默认可关闭 |
-| STM32 对接 | 主机与 STM32 共用 `NavRuntime` 算法调用链，板级只负责输入输出适配；无堆分配、固定容量数组 |
+| 双 MCU/STM32 对接 | 主机与 STM32 共用 `NavRuntime`；固定内存 FCU 状态/指令契约、速度优先与加速度回退、序号/CRC/超时保护和确定性 UART 断线回归 |
 | 诊断与回放 | 输入过期/重复/乱序检查、连续周期 watchdog、64 条固定内存事件环、确定性 CSV 回放，以及带版本/CRC 的二进制遥测 |
 | 故障回归 | 固定内存、确定性的传感器丢包/时间戳异常/非有限值/调度超时注入，并校验恢复、拒绝输出和紧急降落结果 |
 
@@ -62,13 +62,15 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 .\build\mission_sim.exe --telemetry build\mission.bin
 .\build\nav_telemetry_dump.exe build\mission.bin
 .\build\nav_telemetry_dump.exe --csv build\mission.bin
+.\build\fcu_bridge_sim.exe
 ```
 
 退出码：普通任务中，`0` 为任务完成并停靠，`2` 为紧急降落，`3` 为仿真超时，`4` 表示声明的压力分支没有真正触发，`5` 表示共享运行时拒绝无效输入，`6` 表示运行时产生非有限输出，`7` 表示遥测写入、编码或关闭失败。故障回归场景只有在实际结果、诊断掩码和安全动作均符合声明时才返回 `0`，并输出 `FAULT_REGRESSION_SUCCESS`；因此 `imu-stale` 的“安全拒绝”和 `watchdog-overrun` 的“紧急降落”属于测试通过，而不是任务成功。
 
-当前 CTest 共 70 项：
+当前 CTest 共 73 项：
 
-- 15 个模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、遥测编解码、失效轨迹与蜂群安全链路）；
+- 17 个模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、遥测编解码、FCU 桥接与 STM32 指令适配）；
+- 1 个双 MCU UART 延迟、损坏和断线回归；
 - 8 个端到端故障回归场景；
 - 4 个遥测录制与逐帧校验集成测试（含运行时拒绝时的故障现场保留）；
 - 1 个默认闭环测试；
@@ -101,11 +103,11 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 ## STM32 对接路径
 
 1. 先用 `nav_runtime_config_default` 建立字段完整的静态 `NavAppConfig`，再用实机标定值覆盖；不要原样照搬仿真参数。
-2. 实现 `platform/stm32/nav_platform.h` 中的时钟、IMU、ToF、光流、双相机、局部障碍、任务命令、停靠状态、多机通信和 FCU 输出接口。
+2. 实现 `platform/stm32/nav_platform.h` 中的时钟、IMU、ToF、光流、双相机、局部障碍、任务命令、停靠状态、多机通信和非阻塞 FCU 指令队列。
 3. 以 100–200 Hz 调用 `nav_app_step`。IMU 采样、姿态/角速度环、混控和电机输出必须运行在更高优先级。
 4. 在解锁前完成坐标系、单位、时间戳回绕、传感器失效、围栏、紧急指令和停靠触点的台架测试。
 
-低层姿态稳定不能依赖导航任务。`CtrlOutput` 只提供期望加速度与偏航角速度，不能直接驱动电机。
+低层姿态稳定不能依赖导航任务。板级 `nav_fcu_setpoint_write` 接收带有效期的速度/加速度候选目标；适配器只能选择飞控明确支持的控制量，不能直接驱动电机。双 MCU 数据所有权、时序和失联策略见[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)。
 
 ## 已知边界
 
@@ -115,5 +117,8 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。固件只�
 - 没有真实电机、电池、气动、接触结构或无线充电模型。
 - 尚未在目标 STM32、传感器和机体上测量 RAM、最坏执行时间与控制稳定裕量。
 - 30 秒预算是仿真安全约束；实机必须根据电池和比赛规则留出更大的返航裕量。
+- FCU 桥接已有协议无关契约和参考字节流，但尚未绑定或验证任何具体飞控固件。
 
-进一步说明见 [架构文档](docs/architecture.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
+进一步说明见 [架构文档](docs/architecture.md)、[双 MCU 飞控 UART 桥接](docs/fcu_uart_bridge.md)、[日志回放与 watchdog](docs/replay_and_watchdog.md)、[总体方案](General_Plan.md) 和 [STM32 移植说明](platform/stm32/README.md)。
+
+如果需要从整体上理解系统，或准备向其他开发者介绍项目，请阅读[系统工作原理与项目讲解指南](docs/system_overview_and_presentation_guide.md)。
