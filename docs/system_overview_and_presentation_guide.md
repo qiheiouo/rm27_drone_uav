@@ -344,17 +344,17 @@ EMERGENCY
 
 ## 8. 可选的集群能力
 
-主线基础代码已经保留最多 4 架他机的状态、未来轨迹接口、冲突预测和按 `agent_id` 的确定性让行。更完整的链路功能目前位于独立分支：
+当前 `main` 已经合入最多 4 架他机的状态、固定链路帧、确定性多机网络仿真和冲突邻机失联保护。下面三条分支是这些提交的来源和历史开发边界，仍保留在远端用于追溯：
 
 | 分支 | 能力 | 关系 |
 |---|---|---|
-| `feat/swarm-link-protocol` | 固定长度状态帧、CRC、序号和邻机超时表 | 基于 `main` |
-| `feat/swarm-network-simulation` | 多个独立 `NavRuntime` 和确定性故障网络 | 叠加在链路协议上 |
-| `feat/swarm-link-loss-guard` | 冲突邻机失联后的保持与恢复确认 | 叠加在网络仿真上 |
+| `feat/swarm-link-protocol` | 固定长度状态帧、CRC、序号和邻机超时表 | 已合入 `main` |
+| `feat/swarm-network-simulation` | 多个独立 `NavRuntime` 和确定性故障网络 | 已合入 `main` |
+| `feat/swarm-link-loss-guard` | 冲突邻机失联后的保持与恢复确认 | 已合入 `main` |
 
 这仍然不是完整编队、任务分配或分布式轨迹优化器。当前任务如果最终采用多机串行出动，集群模块可以保持关闭。
 
-讲解时必须区分“架构预留”“独立分支已实现”和“已经合并到主线”三种状态，不能混在一起描述。
+讲解时仍要区分“架构预留”“历史开发分支”和“已经合并到主线”三种状态；当前集群三层能力已经在 `main`，但这不等于完成完整编队或分布式优化。
 
 ---
 
@@ -421,15 +421,17 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 
 ## 11. 当前开发分支关系
 
-本文档创建时，功能分支关系如下：
+文档最初创建时的功能分支关系如下；当前这些提交已经按依赖顺序合入 `main`：
 
 ```text
 main
 ├─ feat/fcu-uart-bridge
-│  └─ docs/system-overview-guide   ← 本文档
+│  └─ docs/system-overview-guide
 └─ feat/swarm-link-protocol
    └─ feat/swarm-network-simulation
       └─ feat/swarm-link-loss-guard
+
+当前主线还包含上述分支对应的合并提交；以 `git log --graph --oneline --decorate --all` 为准。
 ```
 
 这意味着本文档所在分支包含双 MCU 桥接，但不自动包含三条集群叠加提交。合并或演示前先运行：
@@ -580,7 +582,7 @@ FCU state link recovered
 
 ### “集群系统完成了吗？”
 
-基础接口和若干独立分支已经完成通信、确定性网络仿真和冲突邻机失联保护，但不是完整编队或分布式优化；是否需要继续取决于比赛是否真的允许或需要多机同时飞行。
+主线已经具备通信、确定性网络仿真和冲突邻机失联保护，但不是完整编队或分布式优化；是否需要继续取决于比赛是否真的允许或需要多机同时飞行。
 
 ### “最担心的技术风险是什么？”
 
