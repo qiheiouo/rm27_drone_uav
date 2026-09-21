@@ -149,6 +149,7 @@ typedef struct {
     HomeTrack home;
     ObstacleRiskReport obstacle;
     CollisionReport swarm_collision;
+    SwarmAvoidanceDecision swarm_avoidance;
     TrajectoryPlanReport trajectory;
     GuidanceOutput guidance;
     CtrlOutput control;

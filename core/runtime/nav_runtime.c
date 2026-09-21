@@ -627,6 +627,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     ImpactReport impact_report;
     ObstacleRiskReport obstacle_report;
     CollisionReport swarm_report;
+    SwarmAvoidanceDecision swarm_avoidance;
     SafetyInput safety_input;
     SafetyDecision safety_decision;
     MissionInput mission_input;
@@ -1050,12 +1051,12 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         guidance.vel_sp, &runtime->obstacles);
     guidance.vel_sp = obstacle_apply_avoidance(guidance.vel_sp,
         &obstacle_report, cfg->ctrl.max_vel);
-    if (swarm_report.conflict) {
-        SwarmAvoidanceDecision avoidance = swarm_avoidance_decide(
-            &cfg->swarm_avoidance, cfg->self_agent_id,
-            &swarm_report, guidance.vel_sp);
+    swarm_avoidance = swarm_avoidance_decide(
+        &cfg->swarm_avoidance, cfg->self_agent_id,
+        &swarm_report, guidance.vel_sp);
+    if (swarm_avoidance.active) {
         guidance.vel_sp = vec3_clamp_norm(vec3_add(guidance.vel_sp,
-            avoidance.velocity_bias), cfg->ctrl.max_vel);
+            swarm_avoidance.velocity_bias), cfg->ctrl.max_vel);
     }
 
     pos_controller_update(&cfg->ctrl, &guidance,
@@ -1071,6 +1072,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     runtime->output.home = runtime->home_detector.out;
     runtime->output.obstacle = obstacle_report;
     runtime->output.swarm_collision = swarm_report;
+    runtime->output.swarm_avoidance = swarm_avoidance;
     runtime->output.trajectory = runtime->trajectory_report;
     runtime->output.guidance = guidance;
     runtime->output.control = runtime->previous_control;

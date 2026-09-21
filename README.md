@@ -18,6 +18,7 @@
 | 动态障碍 | 最多 8 个局部/动态障碍，最近接预测、横向避让和紧急爬升输出 |
 | 多机扩展 | 固定 48 字节版本化状态帧、CRC、重复/乱序/超时邻机表，最多 4 个他机状态、带时间戳未来轨迹消息、未来冲突检测及按 `agent_id` 确定性让行；默认可关闭 |
 | 双 MCU/STM32 对接 | 主机与 STM32 共用 `NavRuntime`；板级只负责输入输出适配；固定内存 FCU 状态/指令契约、速度优先与加速度回退、序号/CRC/超时保护和确定性 UART 断线回归 |
+| 多机网络仿真 | 主机侧支持 2/4 个独立 `NavRuntime`，可注入延迟、丢包、乱序和链路失联，用于验证多机冲突与失联回归 |
 | 诊断与回放 | 输入过期/重复/乱序检查、连续周期 watchdog、64 条固定内存事件环、确定性 CSV 回放，以及带版本/CRC 的二进制遥测 |
 | 故障回归 | 固定内存、确定性的传感器丢包/时间戳异常/非有限值/调度超时注入，并校验恢复、拒绝输出和紧急降落结果 |
 
@@ -52,6 +53,10 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 .\build\mission_sim.exe --scenario target-loss
 .\build\mission_sim.exe --scenario local-obstacle
 .\build\mission_sim.exe --scenario two-agent-conflict
+.\build\swarm_sim.exe --scenario nominal
+.\build\swarm_sim.exe --scenario lossy
+.\build\swarm_sim.exe --scenario outage
+.\build\swarm_sim.exe --scenario four-agent
 .\build\mission_sim.exe --scenario flow-dropout
 .\build\mission_sim.exe --scenario imu-stale
 .\build\mission_sim.exe --scenario watchdog-overrun
@@ -67,11 +72,12 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 
 退出码：普通任务中，`0` 为任务完成并停靠，`2` 为紧急降落，`3` 为仿真超时，`4` 表示声明的压力分支没有真正触发，`5` 表示共享运行时拒绝无效输入，`6` 表示运行时产生非有限输出，`7` 表示遥测写入、编码或关闭失败。故障回归场景只有在实际结果、诊断掩码和安全动作均符合声明时才返回 `0`，并输出 `FAULT_REGRESSION_SUCCESS`；因此 `imu-stale` 的“安全拒绝”和 `watchdog-overrun` 的“紧急降落”属于测试通过，而不是任务成功。
 
-当前 CTest 数量以构建后的 `ctest -N` 为准，当前合并目标预计为 75 项：
+当前 CTest 数量以构建后的 `ctest -N` 为准，当前合并目标预计为 79 项：
 
 - 模块级测试（含共享运行时、输入时效、watchdog、事件环、故障注入器、遥测编解码、FCU 桥接、集群链路与 STM32 适配）；
 - 1 个双 MCU UART 延迟、损坏和断线回归；
 - 2 个 STM32 适配集成测试（FCU 和集群链路）；
+- 4 个多运行时网络回归场景（正常链路、有损乱序、链路中断和四机容量）；
 - 8 个端到端故障回归场景；
 - 4 个遥测录制与逐帧校验集成测试（含运行时拒绝时的故障现场保留）；
 - 1 个默认闭环测试；
@@ -86,6 +92,7 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 遥测格式、带宽和板级队列约束见[结构化遥测](docs/telemetry.md)。遥测保存运行结果，用于诊断；CSV 回放保存运行输入，用于重现。二者不能互相替代。
 
 集群状态帧、邻机生命周期和板级通信约束见[集群链路协议与邻机表](docs/swarm_link.md)。
+多运行时、故障网络和四机容量回归见[确定性多机网络仿真](docs/swarm_simulation.md)。
 
 ## 目录边界
 
