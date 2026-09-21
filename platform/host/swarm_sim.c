@@ -18,6 +18,7 @@ typedef enum {
     SWARM_SIM_NOMINAL = 0,
     SWARM_SIM_LOSSY,
     SWARM_SIM_OUTAGE,
+    SWARM_SIM_GUARDED_OUTAGE,
     SWARM_SIM_FOUR_AGENT
 } SwarmSimScenario;
 
@@ -29,11 +30,18 @@ typedef struct {
     SwarmView view;
     uint32_t conflicts;
     uint32_t yielding_steps;
+    uint32_t guard_holding_steps;
+    uint32_t guard_recovering_steps;
+    uint32_t guard_reason_steps;
+    uint32_t first_conflict_ms;
     uint32_t decode_errors;
     uint8_t max_peer_count;
     uint8_t peer_seen_before_outage;
     uint8_t peer_expired_during_outage;
     uint8_t peer_reacquired;
+    uint8_t guard_recovery_seen;
+    uint8_t guard_recovered;
+    uint8_t guard_guidance_invalid;
     uint8_t emergency_seen;
 } SwarmSimAgent;
 
@@ -43,6 +51,7 @@ static const char *scenario_name(SwarmSimScenario scenario)
     case SWARM_SIM_NOMINAL: return "nominal";
     case SWARM_SIM_LOSSY: return "lossy";
     case SWARM_SIM_OUTAGE: return "outage";
+    case SWARM_SIM_GUARDED_OUTAGE: return "guarded-outage";
     case SWARM_SIM_FOUR_AGENT: return "four-agent";
     default: return "unknown";
     }
@@ -56,6 +65,8 @@ static int parse_scenario(const char *name, SwarmSimScenario *scenario)
         *scenario = SWARM_SIM_LOSSY;
     } else if (strcmp(name, "outage") == 0) {
         *scenario = SWARM_SIM_OUTAGE;
+    } else if (strcmp(name, "guarded-outage") == 0) {
+        *scenario = SWARM_SIM_GUARDED_OUTAGE;
     } else if (strcmp(name, "four-agent") == 0) {
         *scenario = SWARM_SIM_FOUR_AGENT;
     } else {
@@ -66,7 +77,7 @@ static int parse_scenario(const char *name, SwarmSimScenario *scenario)
 
 static void print_scenarios(void)
 {
-    printf("nominal\nlossy\noutage\nfour-agent\n");
+    printf("nominal\nlossy\noutage\nguarded-outage\nfour-agent\n");
 }
 
 static uint8_t output_finite(const NavRuntimeOutput *output)
@@ -131,6 +142,9 @@ static uint8_t agent_init(SwarmSimAgent *agent,
     cfg.swarm_avoidance.mode = SWARM_ENABLED;
     cfg.swarm_avoidance.lateral_bias_mps = 0.85f;
     cfg.swarm_avoidance.critical_climb_mps = 0.40f;
+    if (scenario == SWARM_SIM_GUARDED_OUTAGE) {
+        cfg.swarm_link_guard.enabled = 1u;
+    }
     wq_init(&cfg.outbound_route);
     (void)wq_push(&cfg.outbound_route, goal, 1.25f);
     wq_init(&cfg.search_route);
@@ -239,6 +253,20 @@ static void update_outage_observation(SwarmSimAgent *agent,
     }
 }
 
+static uint8_t runtime_log_contains(const NavRuntime *runtime,
+                                    NavLogEventCode code)
+{
+    NavEventRecord record;
+    uint16_t index;
+    const NavEventLog *log = nav_runtime_event_log(runtime);
+    for (index = 0u; index < nav_event_log_count(log); index++) {
+        if (nav_event_log_get(log, index, &record) && record.code == code) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
 static uint8_t verify_results(SwarmSimScenario scenario,
                               const SwarmSimAgent *agents,
                               uint8_t agent_count,
@@ -282,13 +310,29 @@ static uint8_t verify_results(SwarmSimScenario scenario,
          duplicate_frames == 0u || out_of_order_frames == 0u)) {
         return 0u;
     }
-    if (scenario == SWARM_SIM_OUTAGE) {
+    if (scenario == SWARM_SIM_OUTAGE ||
+        scenario == SWARM_SIM_GUARDED_OUTAGE) {
         if (network->stats.outage_drops == 0u) return 0u;
         for (index = 0u; index < agent_count; index++) {
             if (!agents[index].peer_seen_before_outage ||
                 !agents[index].peer_expired_during_outage ||
                 !agents[index].peer_reacquired ||
                 agents[index].peers.stats.expired_peers == 0u) {
+                return 0u;
+            }
+        }
+    }
+    if (scenario == SWARM_SIM_GUARDED_OUTAGE) {
+        for (index = 0u; index < agent_count; index++) {
+            if (agents[index].guard_holding_steps == 0u ||
+                agents[index].guard_recovering_steps == 0u ||
+                agents[index].guard_reason_steps == 0u ||
+                !agents[index].guard_recovered ||
+                agents[index].guard_guidance_invalid ||
+                !runtime_log_contains(&agents[index].runtime,
+                                      NAV_LOG_SWARM_LINK_HOLD) ||
+                !runtime_log_contains(&agents[index].runtime,
+                                      NAV_LOG_SWARM_LINK_RECOVERED)) {
                 return 0u;
             }
         }
@@ -309,6 +353,7 @@ int main(int argc, char **argv)
     uint32_t step;
     float minimum_separation = 1e9f;
     uint8_t index;
+    uint8_t guarded_outage_scheduled = 0u;
     int argument_index;
 
     for (argument_index = 1; argument_index < argc; argument_index++) {
@@ -371,15 +416,61 @@ int main(int argc, char **argv)
             }
             if (agent->runtime.output.swarm_collision.conflict) {
                 agent->conflicts++;
+                if (agent->first_conflict_ms == 0u) {
+                    agent->first_conflict_ms = now_ms;
+                }
             }
             if (agent->runtime.output.swarm_avoidance.yielding) {
                 agent->yielding_steps++;
+            }
+            if (agent->runtime.output.swarm_link_guard.state ==
+                SWARM_LINK_GUARD_HOLDING) {
+                agent->guard_holding_steps++;
+            }
+            if (agent->runtime.output.swarm_link_guard.state ==
+                SWARM_LINK_GUARD_RECOVERING) {
+                agent->guard_recovering_steps++;
+                agent->guard_recovery_seen = 1u;
+            }
+            if (agent->guard_recovery_seen &&
+                agent->runtime.output.swarm_link_guard.state ==
+                    SWARM_LINK_GUARD_CLEAR) {
+                agent->guard_recovered = 1u;
+            }
+            if ((agent->runtime.output.safety.reason_mask &
+                 SAFETY_REASON_SWARM_LINK) != 0u) {
+                agent->guard_reason_steps++;
+            }
+            if (agent->runtime.output.swarm_link_guard.active &&
+                (!agent->runtime.output.guidance.use_pos_sp ||
+                 agent->runtime.output.trajectory_active ||
+                 vec3_dist(agent->runtime.output.guidance.pos_sp,
+                    agent->runtime.output.swarm_link_guard.hold_position) >
+                        1e-4f)) {
+                agent->guard_guidance_invalid = 1u;
             }
             if (agent->runtime.output.mission.state == MS_EMERGENCY_STABILIZE ||
                 agent->runtime.output.mission.state == MS_EMERGENCY_LAND ||
                 agent->runtime.output.mission.state == MS_ESTIMATOR_LOST) {
                 agent->emergency_seen = 1u;
             }
+        }
+
+        if (scenario == SWARM_SIM_GUARDED_OUTAGE &&
+            !guarded_outage_scheduled &&
+            agents[0].runtime.output.swarm_collision.conflict &&
+            agents[1].runtime.output.swarm_collision.conflict) {
+            network_cfg.outage_start_ms = now_ms;
+            network_cfg.outage_end_ms = now_ms + 1000u;
+            network.cfg.outage_start_ms = network_cfg.outage_start_ms;
+            network.cfg.outage_end_ms = network_cfg.outage_end_ms;
+            agents[0].peer_seen_before_outage =
+                agents[0].view.other_count > 0u ? 1u : 0u;
+            agents[1].peer_seen_before_outage =
+                agents[1].view.other_count > 0u ? 1u : 0u;
+            guarded_outage_scheduled = 1u;
+            printf("[t=%.2f] EVENT guarded conflict-link outage scheduled\n",
+                   (float)now_ms * 0.001f);
         }
 
         for (index = 0u; index < agent_count; index++) {
@@ -421,15 +512,19 @@ int main(int argc, char **argv)
     }
 
     for (index = 0u; index < agent_count; index++) {
-        printf("agent=%u peers=%u conflicts=%u yielding=%u accepted=%u "
-               "duplicate=%u out_of_order=%u expired=%u\n",
+        printf("agent=%u peers=%u conflicts=%u yielding=%u guard_hold=%u "
+               "guard_recover=%u accepted=%u duplicate=%u "
+               "out_of_order=%u expired=%u first_conflict_ms=%u\n",
                agents[index].agent_id, agents[index].max_peer_count,
                (unsigned int)agents[index].conflicts,
                (unsigned int)agents[index].yielding_steps,
+               (unsigned int)agents[index].guard_holding_steps,
+               (unsigned int)agents[index].guard_recovering_steps,
                (unsigned int)agents[index].peers.stats.accepted_frames,
                (unsigned int)agents[index].peers.stats.duplicate_frames,
                (unsigned int)agents[index].peers.stats.out_of_order_frames,
-               (unsigned int)agents[index].peers.stats.expired_peers);
+               (unsigned int)agents[index].peers.stats.expired_peers,
+               (unsigned int)agents[index].first_conflict_ms);
     }
     printf("network delivered=%u dropped=%u duplicated=%u reordered=%u "
            "outage_drops=%u pending=%u min_separation=%.3f\n",

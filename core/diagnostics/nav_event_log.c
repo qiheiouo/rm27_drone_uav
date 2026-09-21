@@ -58,6 +58,8 @@ const char *nav_log_event_code_name(NavLogEventCode code)
     case NAV_LOG_RELOCALIZED: return "relocalized";
     case NAV_LOG_OBSTACLE_RISK: return "obstacle-risk";
     case NAV_LOG_SWARM_CONFLICT: return "swarm-conflict";
+    case NAV_LOG_SWARM_LINK_HOLD: return "swarm-link-hold";
+    case NAV_LOG_SWARM_LINK_RECOVERED: return "swarm-link-recovered";
     case NAV_LOG_TRAJECTORY_DETOUR: return "trajectory-detour";
     case NAV_LOG_TRAJECTORY_INVALID: return "trajectory-invalid";
     default: return "unknown";

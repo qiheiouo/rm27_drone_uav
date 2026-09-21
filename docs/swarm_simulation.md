@@ -42,6 +42,7 @@
 | `nominal` | 固定 20 ms 延迟 | 两机互见、双方发现冲突、仅高 ID 让行、无紧急状态 |
 | `lossy` | 40–100 ms 延迟；每 4 帧丢 1 帧；每 5 帧重复；每 3 帧额外延迟 160 ms | 接收端实际记录重复与乱序，仍能发现冲突并确定性让行 |
 | `outage` | 1.6–2.5 s 全链路中断 | 中断前互见，中断中邻机过期，恢复后重新加入并恢复冲突处理 |
+| `guarded-outage` | 双方发现冲突后动态中断 1 s | 双方进入位置保持和安全降级，稳定恢复后重新规划并继续确定性让行 |
 | `four-agent` | 四机、固定 20 ms 延迟、平行航线 | 每机同时持有其余 3 个邻机，无队列溢出或邻机表容量丢弃 |
 
 两机交叉场景中，正常和有损链路要求真实轨迹间距大于 0.18 m。全链路中断场景只检查没有发生
@@ -55,6 +56,7 @@
 .\build\swarm_sim.exe --scenario nominal
 .\build\swarm_sim.exe --scenario lossy
 .\build\swarm_sim.exe --scenario outage
+.\build\swarm_sim.exe --scenario guarded-outage
 .\build\swarm_sim.exe --scenario four-agent
 ctest --test-dir build -R "test_swarm_network|swarm_" --output-on-failure
 ```

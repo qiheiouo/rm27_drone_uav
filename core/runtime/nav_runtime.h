@@ -19,6 +19,7 @@
 #include "guidance.h"
 #include "collision_interface.h"
 #include "swarm_avoidance.h"
+#include "swarm_link_guard.h"
 #include "nav_event_log.h"
 
 #ifdef __cplusplus
@@ -51,7 +52,8 @@ enum {
     NAV_EVENT_TRAJECTORY_INVALID = 1u << 5,
     NAV_EVENT_INPUT_REJECTED = 1u << 6,
     NAV_EVENT_WATCHDOG_OVERRUN = 1u << 7,
-    NAV_EVENT_WATCHDOG_TRIPPED = 1u << 8
+    NAV_EVENT_WATCHDOG_TRIPPED = 1u << 8,
+    NAV_EVENT_SWARM_LINK_GUARD = 1u << 9
 };
 
 enum {
@@ -97,6 +99,7 @@ typedef struct {
     TrajectoryPlannerConfig planner;
     CollisionConfig swarm_collision;
     SwarmAvoidanceConfig swarm_avoidance;
+    SwarmLinkGuardConfig swarm_link_guard;
     PosCtrlParams ctrl;
     TerminalParams terminal;
     HomeParams home_guidance;
@@ -150,6 +153,7 @@ typedef struct {
     ObstacleRiskReport obstacle;
     CollisionReport swarm_collision;
     SwarmAvoidanceDecision swarm_avoidance;
+    SwarmLinkGuardOutput swarm_link_guard;
     TrajectoryPlanReport trajectory;
     GuidanceOutput guidance;
     CtrlOutput control;
@@ -177,6 +181,7 @@ typedef struct {
     VisionFrontend vision_frontend;
     DynamicObstacleSet obstacles;
     SwarmView swarm;
+    SwarmLinkGuard swarm_link_guard;
     Trajectory trajectory;
     TrajectoryPlanReport trajectory_report;
     CtrlOutput previous_control;

@@ -47,6 +47,22 @@ static uint8_t route_valid(const WaypointQueue *route)
     return 1u;
 }
 
+static uint8_t swarm_guard_may_hold(MissionState state)
+{
+    switch (state) {
+    case MS_TAKEOFF:
+    case MS_OUTBOUND:
+    case MS_SEARCH:
+    case MS_TARGET_ACQUIRE:
+    case MS_TARGET_TRACK:
+    case MS_TERMINAL:
+    case MS_RETURN_HOME:
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
 static uint8_t quaternion_finite(Quatf attitude)
 {
     return (nav_isfinite(attitude.w) && nav_isfinite(attitude.x) &&
@@ -376,6 +392,7 @@ void nav_runtime_config_default(NavRuntimeConfig *cfg)
     obstacle_avoidance_default_config(&cfg->obstacle_avoidance);
     collision_init(&cfg->swarm_collision, 0.60f);
     swarm_avoidance_default_config(&cfg->swarm_avoidance);
+    swarm_link_guard_default_config(&cfg->swarm_link_guard);
 
     camera_init(&cfg->cam_forward, 180.0f, 180.0f, 160.0f, 120.0f,
                 320.0f, 240.0f, CAM_MOUNT_FORWARD);
@@ -544,7 +561,12 @@ uint32_t nav_runtime_config_validate(const NavRuntimeConfig *cfg)
         !positive_finite(cfg->swarm_collision.sample_dt_s) ||
         !positive_finite(cfg->swarm_collision.max_message_age_s) ||
         (cfg->swarm_avoidance.mode != SWARM_DISABLED &&
-         cfg->swarm_avoidance.mode != SWARM_ENABLED)) {
+         cfg->swarm_avoidance.mode != SWARM_ENABLED) ||
+        cfg->swarm_link_guard.enabled > 1u ||
+        (cfg->swarm_link_guard.enabled &&
+         cfg->swarm_avoidance.mode != SWARM_ENABLED) ||
+        !positive_finite(cfg->swarm_link_guard.conflict_clear_confirm_s) ||
+        !positive_finite(cfg->swarm_link_guard.recovery_confirm_s)) {
         errors |= NAV_CONFIG_ERROR_SWARM;
     }
     return errors;
@@ -602,6 +624,8 @@ uint32_t nav_runtime_init(NavRuntime *runtime, const NavRuntimeConfig *cfg)
     vf_init(&runtime->vision_frontend, &cfg->flow, &cfg->cam_down);
     obstacle_set_init(&runtime->obstacles);
     swarm_view_init(&runtime->swarm, cfg->self_agent_id);
+    swarm_link_guard_init(&runtime->swarm_link_guard,
+                          &cfg->swarm_link_guard);
     runtime->trajectory_report = trajectory_report_empty();
     runtime->trajectory_valid = 1u;
     runtime->previous_control.accel_cmd = vec3_zero();
@@ -628,6 +652,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     ObstacleRiskReport obstacle_report;
     CollisionReport swarm_report;
     SwarmAvoidanceDecision swarm_avoidance;
+    SwarmLinkGuardOutput swarm_link_guard_output;
     SafetyInput safety_input;
     SafetyDecision safety_decision;
     MissionInput mission_input;
@@ -892,6 +917,36 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         }
     }
 
+    {
+        SwarmLinkGuardState previous_guard_state =
+            runtime->swarm_link_guard.state;
+        uint8_t previous_hazard_agent_id =
+            runtime->swarm_link_guard.hazard_agent_id;
+        swarm_link_guard_update(&runtime->swarm_link_guard, &runtime->swarm,
+            &swarm_report, &runtime->estimator.out, dt,
+            &swarm_link_guard_output);
+        if (swarm_link_guard_output.active) {
+            event_flags |= NAV_EVENT_SWARM_LINK_GUARD;
+        }
+        if (swarm_link_guard_output.state_changed &&
+            swarm_link_guard_output.state == SWARM_LINK_GUARD_HOLDING) {
+            nav_event_log_push(&runtime->event_log, time_ms,
+                NAV_LOG_SWARM_LINK_HOLD,
+                swarm_link_guard_output.hazard_agent_id,
+                vec3_norm(runtime->estimator.out.vel));
+        } else if (swarm_link_guard_output.state_changed &&
+                   previous_guard_state == SWARM_LINK_GUARD_RECOVERING &&
+                   (swarm_link_guard_output.state ==
+                        SWARM_LINK_GUARD_CLEAR ||
+                    swarm_link_guard_output.state ==
+                        SWARM_LINK_GUARD_MONITORING)) {
+            nav_event_log_push(&runtime->event_log, time_ms,
+                NAV_LOG_SWARM_LINK_RECOVERED,
+                previous_hazard_agent_id,
+                runtime->swarm_link_guard.cfg.recovery_confirm_s);
+        }
+    }
+
     combined_collision_risk = obstacle_report.level;
     if (swarm_report.risk == SWARM_RISK_CRITICAL) {
         combined_collision_risk = COLLISION_RISK_CRITICAL;
@@ -908,6 +963,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     safety_input.trajectory_valid = runtime->trajectory_valid;
     safety_input.controller_saturated = controller_saturated(
         &runtime->previous_control, &cfg->ctrl);
+    safety_input.swarm_link_guard_active = swarm_link_guard_output.active;
     safety_input.dt = dt;
     safety_decision = safety_update_full(&runtime->safety, &safety_input);
 
@@ -972,6 +1028,14 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
                       &runtime->estimator.out, &guidance);
         break;
     case GM_WAYPOINT:
+        if (swarm_link_guard_output.active &&
+            swarm_guard_may_hold(runtime->mission_output.state)) {
+            guidance_hold(&swarm_link_guard_output.hold_position,
+                          &runtime->estimator.out, &guidance);
+            runtime->trajectory_active = 0u;
+            runtime->trajectory_time_s = 0.0f;
+            break;
+        }
         if (!runtime->trajectory_active || runtime->mission_output.state_changed ||
             traj_done(&runtime->trajectory, runtime->trajectory_time_s)) {
             runtime->trajectory_report = trajectory_plan_single(&runtime->trajectory,
@@ -1046,6 +1110,16 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         break;
     }
 
+    if (swarm_link_guard_output.active &&
+        swarm_guard_may_hold(runtime->mission_output.state)) {
+        guidance_hold(&swarm_link_guard_output.hold_position,
+                      &runtime->estimator.out, &guidance);
+        if (runtime->mission_output.guidance == GM_WAYPOINT) {
+            runtime->trajectory_active = 0u;
+            runtime->trajectory_time_s = 0.0f;
+        }
+    }
+
     obstacle_report = obstacle_evaluate(&cfg->obstacle_avoidance,
         runtime->estimator.out.pos, runtime->estimator.out.vel,
         guidance.vel_sp, &runtime->obstacles);
@@ -1054,7 +1128,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     swarm_avoidance = swarm_avoidance_decide(
         &cfg->swarm_avoidance, cfg->self_agent_id,
         &swarm_report, guidance.vel_sp);
-    if (swarm_avoidance.active) {
+    if (swarm_avoidance.active && !swarm_link_guard_output.active) {
         guidance.vel_sp = vec3_clamp_norm(vec3_add(guidance.vel_sp,
             swarm_avoidance.velocity_bias), cfg->ctrl.max_vel);
     }
@@ -1073,6 +1147,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     runtime->output.obstacle = obstacle_report;
     runtime->output.swarm_collision = swarm_report;
     runtime->output.swarm_avoidance = swarm_avoidance;
+    runtime->output.swarm_link_guard = swarm_link_guard_output;
     runtime->output.trajectory = runtime->trajectory_report;
     runtime->output.guidance = guidance;
     runtime->output.control = runtime->previous_control;
