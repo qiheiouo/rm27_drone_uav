@@ -25,6 +25,7 @@ void pos_controller_update(const PosCtrlParams *params,
         vel_cmd = vec3_add(vel_cmd, vel_from_pos);
     }
     vel_cmd = vec3_clamp_norm(vel_cmd, params->max_vel);
+    out->velocity_cmd = vel_cmd;
 
     vel_error = vec3_sub(vel_cmd, nav->vel);
     out->accel_cmd = vec3_scale(vel_error, params->kp_vel);

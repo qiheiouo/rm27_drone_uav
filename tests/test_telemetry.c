@@ -38,6 +38,7 @@ int main(void)
     output.target.rel_pos = vec3(2.0f, 1.0f, 0.5f);
     output.home.rel_pos = vec3(-1.0f, 0.25f, -0.75f);
     output.guidance.vel_sp = vec3(0.4f, -0.2f, 0.1f);
+    output.control.velocity_cmd = vec3(0.2f, -0.1f, 0.0f);
     output.control.accel_cmd = vec3(0.5f, 0.6f, -0.7f);
     output.control.yaw_rate_cmd = -0.8f;
     output.terminal_stage = TERMINAL_CLOSING;

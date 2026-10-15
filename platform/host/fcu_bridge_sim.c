@@ -143,6 +143,8 @@ int main(void)
     uint8_t stale_seen = 0u;
     uint8_t failsafe_seen = 0u;
     uint8_t recovered_seen = 0u;
+    uint8_t recovery_inhibited_seen = 0u;
+    uint8_t motion_request = 1u;
     FcuBridgeStatus previous_status = FCU_BRIDGE_WAITING;
 
     memset(&state_uart, 0, sizeof(state_uart));
@@ -161,6 +163,7 @@ int main(void)
     guidance.yaw_sp = 0.0f;
     guidance.use_pos_sp = 0u;
     guidance.use_accel_sp = 0u;
+    control.velocity_cmd = guidance.vel_sp;
     control.accel_cmd = vec3(0.2f, 0.0f, 0.0f);
     control.yaw_rate_cmd = 0.0f;
 
@@ -170,6 +173,9 @@ int main(void)
         FcuLinkFrame parsed_frame;
         FcuBridgeStatus status;
         uint32_t state_age_ms = 0u;
+
+        if (now_ms == SIM_OUTAGE_END_MS + 40u) motion_request = 0u;
+        if (now_ms == SIM_OUTAGE_END_MS + 50u) motion_request = 1u;
 
         if (fcu_link_encode_state(&outgoing_state, state_frame) != FCU_LINK_OK)
             return 2;
@@ -212,8 +218,9 @@ int main(void)
                                      &state_age_ms)) {
                 if (state_age_ms > max_state_age_ms) max_state_age_ms = state_age_ms;
             }
-            if (fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u,
-                                         now_ms, &outgoing_command) &&
+            if (fcu_bridge_make_setpoint(&bridge, &guidance, &control,
+                                         motion_request, now_ms,
+                                         &outgoing_command) &&
                 fcu_link_encode_setpoint(&outgoing_command, command_frame) ==
                     FCU_LINK_OK) {
                 if (in_outage(now_ms)) {
@@ -242,6 +249,10 @@ int main(void)
                     received_command = decoded;
                     command_received_at_ms = now_ms;
                     command_seen = 1u;
+                    if (now_ms >= SIM_OUTAGE_END_MS &&
+                        !decoded.motion_enabled) {
+                        recovery_inhibited_seen = 1u;
+                    }
                 } else {
                     command_decode_errors++;
                 }
@@ -281,6 +292,7 @@ int main(void)
            (unsigned long)command_outage_drops);
 
     if (!stale_seen || !failsafe_seen || !recovered_seen ||
+        !recovery_inhibited_seen ||
         state_decode_errors != 1u || bridge.stats.stale_transitions != 1u ||
         bridge.stats.resynchronized_states != 1u ||
         fresh_command_steps == 0u || state_uart.dropped != 0u ||

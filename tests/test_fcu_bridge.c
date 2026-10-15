@@ -45,6 +45,7 @@ static void make_nav_command(GuidanceOutput *guidance, CtrlOutput *control)
     guidance->yaw_sp = 0.7f;
     guidance->use_pos_sp = 1u;
     guidance->use_accel_sp = 0u;
+    control->velocity_cmd = vec3(0.8f, -0.2f, 0.1f);
     control->accel_cmd = vec3(0.3f, -0.1f, 0.2f);
     control->yaw_rate_cmd = -0.4f;
 }
@@ -74,6 +75,12 @@ int main(void)
     fcu_bridge_config_default(&cfg);
     CHECK(fcu_bridge_config_valid(&cfg));
     cfg.state_timeout_ms = 0u;
+    CHECK(!fcu_bridge_config_valid(&cfg));
+    fcu_bridge_config_default(&cfg);
+    cfg.preferred_yaw_control = (FcuYawControlMode)99;
+    CHECK(!fcu_bridge_config_valid(&cfg));
+    fcu_bridge_config_default(&cfg);
+    cfg.control_frame = (FcuControlFrame)99;
     CHECK(!fcu_bridge_config_valid(&cfg));
     fcu_bridge_config_default(&cfg);
 
@@ -129,9 +136,19 @@ int main(void)
     CHECK(bridge.stats.resynchronized_states == 1u);
 
     make_nav_command(&guidance, &control);
+    /* Link recovery does not restore a high request; observe low then re-arm. */
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 165u,
+                                   &setpoint));
+    CHECK(!setpoint.motion_enabled);
+    CHECK(setpoint.valid_mask == 0u);
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 0u, 166u,
+                                   &setpoint));
+    CHECK(!setpoint.motion_enabled);
     CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 170u,
                                    &setpoint));
-    CHECK(setpoint.preferred_control == FCU_CONTROL_VELOCITY);
+    CHECK(setpoint.control_mode == FCU_CONTROL_VELOCITY);
+    CHECK(setpoint.control_frame == FCU_CONTROL_FRAME_LOCAL_XY_Z_UP);
+    CHECK(setpoint.yaw_control == FCU_YAW_CONTROL_ANGLE);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_VELOCITY) != 0u);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_ACCELERATION) == 0u);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_YAW) != 0u);
@@ -140,8 +157,27 @@ int main(void)
     CHECK(fcu_link_decode_setpoint(command_frame, sizeof(command_frame),
                                    &decoded_setpoint) == FCU_LINK_OK);
     CHECK(nearf(decoded_setpoint.velocity_sp.x, 0.8f));
+    CHECK(decoded_setpoint.control_frame ==
+          FCU_CONTROL_FRAME_LOCAL_XY_Z_UP);
+    CHECK(decoded_setpoint.yaw_control == FCU_YAW_CONTROL_ANGLE);
     CHECK(fcu_setpoint_is_fresh(&decoded_setpoint, 180u, 280u));
     CHECK(!fcu_setpoint_is_fresh(&decoded_setpoint, 180u, 281u));
+
+    /* A finalized command cannot contain mismatched primary/yaw modes. */
+    decoded_setpoint.control_mode = FCU_CONTROL_ACCELERATION;
+    CHECK(fcu_link_encode_setpoint(&decoded_setpoint, command_frame) ==
+          FCU_LINK_ERROR_VALUE);
+    decoded_setpoint.control_mode = FCU_CONTROL_VELOCITY;
+    decoded_setpoint.yaw_control = FCU_YAW_CONTROL_RATE;
+    CHECK(fcu_link_encode_setpoint(&decoded_setpoint, command_frame) ==
+          FCU_LINK_ERROR_VALUE);
+    decoded_setpoint.yaw_control = FCU_YAW_CONTROL_ANGLE;
+    decoded_setpoint.control_frame = (FcuControlFrame)99;
+    CHECK(fcu_link_encode_setpoint(&decoded_setpoint, command_frame) ==
+          FCU_LINK_ERROR_VALUE);
+    decoded_setpoint.control_frame = FCU_CONTROL_FRAME_LOCAL_XY_Z_UP;
+    CHECK(fcu_link_encode_setpoint(&decoded_setpoint, command_frame) ==
+          FCU_LINK_OK);
     command_frame[40] ^= 0x01u;
     CHECK(fcu_link_decode_setpoint(command_frame, sizeof(command_frame),
                                    &decoded_setpoint) == FCU_LINK_ERROR_CRC);
@@ -169,7 +205,8 @@ int main(void)
           FCU_BRIDGE_ACCEPTED);
     CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 1010u,
                                    &setpoint));
-    CHECK(setpoint.preferred_control == FCU_CONTROL_ACCELERATION);
+    CHECK(setpoint.control_mode == FCU_CONTROL_ACCELERATION);
+    CHECK(setpoint.yaw_control == FCU_YAW_CONTROL_RATE);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_ACCELERATION) != 0u);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_VELOCITY) == 0u);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_YAW_RATE) != 0u);
@@ -181,9 +218,27 @@ int main(void)
     CHECK(fcu_bridge_ingest_state(&bridge, &state, 1030u) ==
           FCU_BRIDGE_REJECTED_INVALID);
 
+    make_nav_command(&guidance, &control);
+    control.velocity_cmd.x = NAN;
+    CHECK(!fcu_setpoint_from_nav(&guidance, &control,
+        FCU_CONTROL_VELOCITY, FCU_YAW_CONTROL_ANGLE,
+        FCU_CONTROL_FRAME_LOCAL_XY_Z_UP, 1u, 8u, 1900u, 100u,
+        &setpoint));
+    control.velocity_cmd.x = INFINITY;
+    CHECK(!fcu_setpoint_from_nav(&guidance, &control,
+        FCU_CONTROL_VELOCITY, FCU_YAW_CONTROL_ANGLE,
+        FCU_CONTROL_FRAME_LOCAL_XY_Z_UP, 1u, 8u, 1900u, 100u,
+        &setpoint));
+    control.velocity_cmd.x = 0.8f;
+    CHECK(!fcu_setpoint_from_nav(&guidance, &control,
+        FCU_CONTROL_AUTO, FCU_YAW_CONTROL_ANGLE,
+        FCU_CONTROL_FRAME_LOCAL_XY_Z_UP, 1u, 8u, 1900u, 100u,
+        &setpoint));
+
     fcu_setpoint_disable(9u, 2000u, &setpoint);
     CHECK(!setpoint.motion_enabled);
     CHECK(setpoint.valid_mask == 0u);
+    CHECK(setpoint.yaw_control == FCU_YAW_CONTROL_NONE);
     CHECK(fcu_link_encode_setpoint(&setpoint, command_frame) == FCU_LINK_OK);
     CHECK(!fcu_setpoint_is_fresh(&setpoint, 2000u, 2000u));
 

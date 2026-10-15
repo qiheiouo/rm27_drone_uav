@@ -79,6 +79,19 @@ typedef enum {
     FCU_CONTROL_ACCELERATION
 } FcuControlPreference;
 
+/* FlightCommand is always expressed in the navigation local frame. */
+typedef enum {
+    FCU_CONTROL_FRAME_LOCAL_XY_Z_UP = 0
+} FcuControlFrame;
+
+/* AUTO is a bridge-side selection request, never a finalized command mode. */
+typedef enum {
+    FCU_YAW_CONTROL_AUTO = 0,
+    FCU_YAW_CONTROL_ANGLE,
+    FCU_YAW_CONTROL_RATE,
+    FCU_YAW_CONTROL_NONE
+} FcuYawControlMode;
+
 typedef enum {
     FCU_BRIDGE_WAITING = 0,
     FCU_BRIDGE_ACTIVE,
@@ -139,7 +152,9 @@ typedef struct {
     float yaw_sp;
     float yaw_rate_sp;
     uint16_t validity_ms;
-    FcuControlPreference preferred_control;
+    FcuControlPreference control_mode;
+    FcuControlFrame control_frame;
+    FcuYawControlMode yaw_control;
     uint8_t motion_enabled;
 } FcuSetpoint;
 
@@ -148,7 +163,19 @@ typedef struct {
     uint16_t command_validity_ms;
     uint32_t required_state_mask;
     FcuControlPreference preferred_control;
+    FcuYawControlMode preferred_yaw_control;
+    FcuControlFrame control_frame;
 } FcuBridgeConfig;
+
+/*
+ * Edge-triggered host motion authority. A prerequisite failure revokes the
+ * grant and a low request followed by a new high request is required before
+ * motion can be granted again.
+ */
+typedef struct {
+    uint8_t granted;
+    uint8_t rearm_ready;
+} FcuMotionAuthorization;
 
 typedef struct {
     uint32_t accepted_states;
@@ -164,6 +191,7 @@ typedef struct {
     FcuBridgeConfig cfg;
     FcuStateSnapshot latest_state;
     FcuBridgeStats stats;
+    FcuMotionAuthorization motion_authorization;
     uint32_t received_at_ms;
     uint16_t next_command_sequence;
     FcuBridgeStatus status;
@@ -196,7 +224,7 @@ uint8_t fcu_bridge_get_state(FcuBridge *bridge, uint32_t now_ms,
 uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
                                  const GuidanceOutput *guidance,
                                  const CtrlOutput *control,
-                                 uint8_t motion_enabled,
+                                 uint8_t motion_authorization_request,
                                  uint32_t now_ms,
                                  FcuSetpoint *setpoint);
 
@@ -212,10 +240,19 @@ uint8_t fcu_state_to_nav_samples(const FcuStateSnapshot *state,
                                  OdomSample *odometry,
                                  float *height_m);
 
+void fcu_motion_authorization_init(FcuMotionAuthorization *authorization);
+void fcu_motion_authorization_revoke(FcuMotionAuthorization *authorization);
+uint8_t fcu_motion_authorization_update(
+    FcuMotionAuthorization *authorization,
+    uint8_t motion_requested,
+    uint8_t prerequisites_valid);
+
 /* Build a protocol-neutral command envelope for a board-specific adapter. */
 uint8_t fcu_setpoint_from_nav(const GuidanceOutput *guidance,
                               const CtrlOutput *control,
-                              FcuControlPreference preferred_control,
+                              FcuControlPreference control_mode,
+                              FcuYawControlMode yaw_control,
+                              FcuControlFrame control_frame,
                               uint8_t motion_enabled,
                               uint16_t sequence,
                               uint32_t timestamp_ms,

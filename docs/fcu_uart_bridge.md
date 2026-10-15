@@ -1,6 +1,6 @@
 # 飞控状态与指令链路参考设计
 
-> 状态：`Draft / 候选方案`。本文记录现有 `FcuBridge`、`FcuStateSnapshot`、`FcuSetpoint` 和 `RMFC` 参考字节流的设计证据，适用于 STM32 或 ARM Linux 上层的协议适配。它不表示已选定双 MCU、UART、PX4/MAVLink 或任何真实飞控。
+> 状态：FlightCommand 软件契约为 `Frozen / Sim-verified`；`RMFC` 传输和真实飞控适配仍为 `Draft / 候选方案`。本文记录现有 `FcuBridge`、`FcuStateSnapshot`、`FcuSetpoint` 和参考字节流的设计证据，适用于 STM32 或 ARM Linux 上层的协议适配。它不表示已选定双 MCU、UART、PX4/MAVLink 或任何真实飞控。
 
 ## 目标与边界
 
@@ -11,7 +11,9 @@
   → 带采样时间的 FcuStateSnapshot
   → fcu_state_to_flight_state（坐标/时间已由适配器归一化）
   → NavRuntime 外部状态直通、任务、规划与制导
-  → 有有效期的 FcuSetpoint
+  → CtrlOutput.velocity_cmd（导航期望速度）
+  → FcuMotionAuthorization（最终主机授权）
+  → 有有效期的 FcuSetpoint（已授权速度或禁用包）
   → 飞控速度/加速度接口
   → 姿态环、角速度环、混控和电机
 ```
@@ -50,17 +52,30 @@ NED 数据直接交给 `NavRuntime`。在两块 MCU 尚未完成时钟同步时�
 飞控是否接受位置、速度、加速度、偏航角、偏航角速度和外部控制。未知或非有限字段、非法
 布尔值、越界电量和畸形四元数会被拒绝。
 
-`FcuSetpoint` 同时可以携带位置、速度、加速度、偏航和偏航角速度，但实际适配器每帧只能
-选择飞控明确支持的一种主控制量，不能把速度环和加速度环重复串接：
+`FcuSetpoint` 保留位置字段用于参考编码兼容，但当前已授权运动包执行严格互斥：主控制量只能
+选择 velocity 或 acceleration，航向只能选择 yaw angle 或 yaw rate。`AUTO` 只允许作为
+`FcuBridgeConfig` 的能力选择请求，不能出现在最终运动包中；模式、有效位不匹配以及 NaN/Inf
+都会被拒绝。当前内部 `control_frame` 只允许右手 local XY、Z-up：
 
-- 支持外部速度控制时，优先发送 `GuidanceOutput.vel_sp` 和偏航目标；
+- 支持外部速度控制时，发送 `CtrlOutput.velocity_cmd` 和选定航向目标；该速度包含现有位置/速度制导形成的完整导航期望，不只是速度前馈；
 - 只支持外部加速度控制时，发送 `CtrlOutput.accel_cmd` 和偏航角速度；
 - 不支持这两种接口时，不得悄悄退化成电机输出；需要重新评估飞控选型或单独设计遥控量适配。
 
-`NavApp` 现在调用非阻塞的 `nav_fcu_setpoint_write`，每条命令带序号、生成时间、有效期和
-`motion_enabled`。默认有效期为 100 ms，可用 `NAV_APP_FCU_COMMAND_VALIDITY_MS` 在板级
-编译配置中覆盖。运行时输入无效时会立即发送禁用包并清除解锁请求；队列拒绝通过
-`NavApp.fcu_tx_drops` 计数。
+`NavApp` 是正式装配路径唯一的最终主机授权所有者。`NavMissionCommand.motion_authorization_request`
+是请求，不是飞控 armed 反馈；只有本周期状态有效、任务处于运动状态且观察到有效低→高边沿时，
+`FcuMotionAuthorization` 才允许生成 `motion_enabled=1` 的包。运行时输入、命令数值/模式或发送前置
+条件失效会撤销授权；定位恢复后持续保持高的旧请求不会自动恢复，必须先拉低再重新拉高。同周期
+故障和新高请求竞争时故障优先。
+
+候选装配默认使用 velocity + yaw angle，可分别由 `NAV_APP_FCU_CONTROL_MODE` 和
+`NAV_APP_FCU_YAW_CONTROL` 在板级编译配置中选择。yaw angle 与 yaw rate 的未来最终选择尚未冻结；
+适配器负责按真实飞控能力选定其一，若需要二者互转，转换责任也属于适配器而不是导航核心。
+
+每条命令带序号、生成时间和有效期。默认有效期为 100 ms，可用
+`NAV_APP_FCU_COMMAND_VALIDITY_MS` 覆盖；接收侧以本地接收时刻计算年龄。禁用包为
+`motion_enabled=0`、`valid_mask=0`、1 ms 有效期。`nav_fcu_set_motion_authorized()` 只报告主机
+最终授权状态，不代表飞控已解锁、接受或执行。队列拒绝由 `NavApp.fcu_tx_drops` 计数并撤销授权，
+本地命令构造拒绝由 `fcu_command_rejections` 计数。
 
 ## 链路健康状态机
 
@@ -68,14 +83,14 @@ NED 数据直接交给 `NavRuntime`。在两块 MCU 尚未完成时钟同步时�
 
 ```text
 WAITING → ACTIVE → STALE
-                    ↓ 新的有效状态
-                  ACTIVE
+                    ↓ 新的有效状态（仅恢复计算）
+                  ACTIVE ──→ 等待新的低→高运动授权
 ```
 
 默认 50 ms 没有收到新的飞控状态就进入 `STALE`，导航侧不再生成运动指令。活动链路拒绝
 重复和倒序序号，并正确处理 16 位序号回绕；链路已经超时后允许飞控重启并重新同步新的序号
 起点。接收飞控的一侧仍必须独立检查指令接收年龄，超过 `validity_ms` 后禁止永久复用
-最后一条速度指令。具体是刹停、悬停、降落还是停桨，必须在飞控选型后配置并实测；当前
+最后一条速度指令。状态链路恢复只允许重新计算，不自动恢复运动授权。具体是刹停、悬停、降落还是停桨，必须在飞控选型后配置并实测；当前
 代码和主机测试不证明任何一种实机 Failsafe 已具备。
 
 50/100 ms 是软件回归默认值，不是实机安全结论。它们必须结合状态发送频率、UART 最坏
@@ -88,7 +103,11 @@ WAITING → ACTIVE → STALE
 | 帧 | 长度 | 内容 |
 |---|---:|---|
 | FCU 状态 | 100 B | `RMFC`、版本、类型、长度、序号、状态标志、源时间、有效位、能力、姿态、IMU、位置速度、高度、电量、CRC32 |
-| 导航指令 | 72 B | `RMFC`、版本、类型、长度、序号、源时间、有效位、控制偏好、运动使能、有效期、位置/速度/加速度、偏航/偏航角速度、CRC32 |
+| 导航指令 | 72 B | `RMFC`、版本、类型、长度、序号、源时间、有效位、最终主控制模式、运动使能、有效期、位置/速度/加速度、偏航/偏航角速度、CRC32 |
+
+参考字节流保持 72 B 和 schema v1：内部 frame 在本版协议中固定为 local XY、Z-up，不单独占线字段；
+航向模式由互斥的 yaw/yaw-rate 有效位无歧义恢复。未来若需要传输其他 frame，必须升级 schema，
+不能沿用 v1 静默解释。
 
 `FcuLinkParser` 可以从任意分片的 UART 字节流中寻找魔数并在错误长度或噪声后重新同步；完整
 帧仍必须经过版本、类型、保留位、CRC 和数值检查。CRC 只能发现传输损坏，不提供身份认证。
@@ -112,11 +131,12 @@ WAITING → ACTIVE → STALE
 ```powershell
 .\build\test_fcu_bridge.exe
 .\build\test_nav_app_fcu.exe
+.\build\test_nav_app_flight_command.exe
 .\build\fcu_bridge_sim.exe
 ```
 
 确定性仿真包含 20 ms 传输延迟、字节流噪声、单帧 CRC 损坏和 300 ms 双向中断。它必须
-观察到导航侧状态超时、飞控侧指令过期、禁止继续输出以及恢复后的序号重新同步，并输出
+观察到导航侧状态超时、飞控侧指令过期、恢复后仍禁止运动、显式重授权以及序号重新同步，并输出
 `FCU_BRIDGE_SIM_SUCCESS`。
 
 ## 选型后仍需完成

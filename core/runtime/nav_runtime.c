@@ -215,13 +215,20 @@ static uint8_t reject_runtime_input(NavRuntime *runtime,
                                     const NavRuntimeHealth *health,
                                     uint32_t event_flags)
 {
+    target_tracker_reset(&runtime->target_tracker);
+    terminal_guidance_reset(&runtime->terminal);
+    guidance_output_hold(&runtime->output.guidance,
+                         &runtime->estimator.out);
+    runtime->previous_control.velocity_cmd = vec3_zero();
+    runtime->previous_control.accel_cmd = vec3_zero();
+    runtime->previous_control.yaw_rate_cmd = 0.0f;
     runtime->output.nav = runtime->estimator.out;
+    runtime->output.target = runtime->target_tracker.out;
     runtime->output.health = *health;
     runtime->output.event_flags = event_flags;
     runtime->output.armed = 0u;
     runtime->output.step_valid = 0u;
-    runtime->output.control.accel_cmd = vec3_zero();
-    runtime->output.control.yaw_rate_cmd = 0.0f;
+    runtime->output.control = runtime->previous_control;
     return 0u;
 }
 
@@ -707,6 +714,7 @@ uint32_t nav_runtime_init(NavRuntime *runtime, const NavRuntimeConfig *cfg)
                           &cfg->swarm_link_guard);
     runtime->trajectory_report = trajectory_report_empty();
     runtime->trajectory_valid = 1u;
+    runtime->previous_control.velocity_cmd = vec3_zero();
     runtime->previous_control.accel_cmd = vec3_zero();
     runtime->previous_control.yaw_rate_cmd = 0.0f;
     runtime->mission_output.state = MS_BOOT;
@@ -747,6 +755,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         if (runtime != 0) {
             runtime->output.armed = 0u;
             runtime->output.step_valid = 0u;
+            runtime->output.control.velocity_cmd = vec3_zero();
             runtime->output.control.accel_cmd = vec3_zero();
             runtime->output.control.yaw_rate_cmd = 0.0f;
         }
@@ -770,6 +779,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         runtime->output.event_flags = event_flags;
         runtime->output.armed = 0u;
         runtime->output.step_valid = 0u;
+        runtime->output.control.velocity_cmd = vec3_zero();
         runtime->output.control.accel_cmd = vec3_zero();
         runtime->output.control.yaw_rate_cmd = 0.0f;
         return 0u;

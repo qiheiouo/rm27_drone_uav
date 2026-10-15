@@ -92,26 +92,39 @@ static void nav_app_flush_events(NavApp *app)
     }
 }
 
-static void nav_app_disable_fcu(NavApp *app, uint32_t timestamp_ms)
+static void nav_app_write_fcu(NavApp *app, uint32_t timestamp_ms,
+                              uint8_t motion_enabled)
 {
     FcuSetpoint setpoint;
-    fcu_setpoint_disable(app->fcu_command_sequence++, timestamp_ms, &setpoint);
-    if (nav_fcu_setpoint_write(&setpoint) != 0) app->fcu_tx_drops++;
-    nav_fcu_set_armed(0u);
+    uint16_t sequence = app->fcu_command_sequence++;
+    if (!motion_enabled) {
+        fcu_setpoint_disable(sequence, timestamp_ms, &setpoint);
+    } else if (!fcu_setpoint_from_nav(
+                   &app->runtime.output.guidance,
+                   &app->runtime.output.control,
+                   NAV_APP_FCU_CONTROL_MODE,
+                   NAV_APP_FCU_YAW_CONTROL,
+                   FCU_CONTROL_FRAME_LOCAL_XY_Z_UP,
+                   1u, sequence, timestamp_ms,
+                   NAV_APP_FCU_COMMAND_VALIDITY_MS, &setpoint)) {
+        app->fcu_command_rejections++;
+        fcu_motion_authorization_revoke(&app->motion_authorization);
+        fcu_setpoint_disable(sequence, timestamp_ms, &setpoint);
+        motion_enabled = 0u;
+    }
+    if (nav_fcu_setpoint_write(&setpoint) != 0) {
+        app->fcu_tx_drops++;
+        fcu_motion_authorization_revoke(&app->motion_authorization);
+        motion_enabled = 0u;
+    }
+    nav_fcu_set_motion_authorized(motion_enabled);
 }
 
-static void nav_app_send_fcu(NavApp *app, uint32_t timestamp_ms)
+static void nav_app_revoke_and_disable_fcu(NavApp *app,
+                                           uint32_t timestamp_ms)
 {
-    FcuSetpoint setpoint;
-    if (!fcu_setpoint_from_nav(&app->runtime.output.guidance,
-                               &app->runtime.output.control,
-                               FCU_CONTROL_AUTO,
-                               app->runtime.output.armed,
-                               app->fcu_command_sequence++, timestamp_ms,
-                               NAV_APP_FCU_COMMAND_VALIDITY_MS, &setpoint) ||
-        nav_fcu_setpoint_write(&setpoint) != 0) {
-        app->fcu_tx_drops++;
-    }
+    fcu_motion_authorization_revoke(&app->motion_authorization);
+    nav_app_write_fcu(app, timestamp_ms, 0u);
 }
 
 uint32_t nav_app_init(NavApp *app, const NavAppConfig *cfg)
@@ -122,7 +135,9 @@ uint32_t nav_app_init(NavApp *app, const NavAppConfig *cfg)
     app->telemetry_sequence = 0u;
     app->telemetry_step_count = 0u;
     app->fcu_tx_drops = 0u;
+    app->fcu_command_rejections = 0u;
     app->fcu_command_sequence = 0u;
+    fcu_motion_authorization_init(&app->motion_authorization);
     app->swarm_decode_errors = 0u;
     app->swarm_tx_drops = 0u;
     app->swarm_tx_step_count = 0u;
@@ -161,7 +176,7 @@ void nav_app_step(NavApp *app, float dt)
     time_ms = nav_time_ms();
     if (app->config_errors != NAV_CONFIG_ERROR_NONE ||
         nav_imu_read(&imu) != 0) {
-        nav_app_disable_fcu(app, time_ms);
+        nav_app_revoke_and_disable_fcu(app, time_ms);
         return;
     }
 
@@ -183,6 +198,7 @@ void nav_app_step(NavApp *app, float dt)
     mission_command.start = 0u;
     mission_command.request_return = 0u;
     mission_command.request_emergency = 0u;
+    mission_command.motion_authorization_request = 0u;
     (void)nav_mission_command_read(&mission_command);
     dock_status.contact = 0u;
     dock_status.charging = 0u;
@@ -210,13 +226,17 @@ void nav_app_step(NavApp *app, float dt)
     if (!nav_runtime_step(&app->runtime, &input)) {
         nav_app_flush_events(app);
         nav_app_emit_telemetry(app, time_ms, 1u);
-        nav_app_disable_fcu(app, time_ms);
+        nav_app_revoke_and_disable_fcu(app, time_ms);
         return;
     }
 
     nav_app_flush_events(app);
     nav_app_emit_telemetry(app, time_ms, 0u);
     nav_app_send_swarm(app);
-    nav_app_send_fcu(app, time_ms);
-    nav_fcu_set_armed(app->runtime.output.armed);
+    nav_app_write_fcu(app, time_ms,
+        fcu_motion_authorization_update(
+            &app->motion_authorization,
+            mission_command.motion_authorization_request,
+            (app->runtime.output.step_valid && app->runtime.output.armed)
+                ? 1u : 0u));
 }

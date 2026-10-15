@@ -122,15 +122,41 @@ static uint8_t preference_valid(FcuControlPreference preference)
             preference == FCU_CONTROL_ACCELERATION) ? 1u : 0u;
 }
 
+static uint8_t finalized_control_valid(FcuControlPreference control_mode)
+{
+    return (control_mode == FCU_CONTROL_VELOCITY ||
+            control_mode == FCU_CONTROL_ACCELERATION) ? 1u : 0u;
+}
+
+static uint8_t yaw_preference_valid(FcuYawControlMode yaw_control)
+{
+    return (yaw_control == FCU_YAW_CONTROL_AUTO ||
+            yaw_control == FCU_YAW_CONTROL_ANGLE ||
+            yaw_control == FCU_YAW_CONTROL_RATE) ? 1u : 0u;
+}
+
+static uint8_t control_frame_valid(FcuControlFrame control_frame)
+{
+    return control_frame == FCU_CONTROL_FRAME_LOCAL_XY_Z_UP ? 1u : 0u;
+}
+
 static uint8_t setpoint_is_valid(const FcuSetpoint *setpoint)
 {
+    uint32_t primary_mask;
+    uint32_t yaw_mask;
     if (setpoint == 0 || sizeof(float) != 4u ||
-        !preference_valid(setpoint->preferred_control) ||
+        !preference_valid(setpoint->control_mode) ||
+        !control_frame_valid(setpoint->control_frame) ||
         setpoint->motion_enabled > 1u || setpoint->validity_ms == 0u ||
         setpoint->validity_ms > FCU_LINK_MAX_VALIDITY_MS ||
         (setpoint->valid_mask & ~FCU_SETPOINT_VALID_KNOWN_MASK) != 0u) {
         return 0u;
     }
+    primary_mask = setpoint->valid_mask &
+        (FCU_SETPOINT_VALID_POSITION | FCU_SETPOINT_VALID_VELOCITY |
+         FCU_SETPOINT_VALID_ACCELERATION);
+    yaw_mask = setpoint->valid_mask &
+        (FCU_SETPOINT_VALID_YAW | FCU_SETPOINT_VALID_YAW_RATE);
     if ((setpoint->valid_mask & FCU_SETPOINT_VALID_POSITION) != 0u &&
         !vec3_is_finite(setpoint->position_sp)) {
         return 0u;
@@ -151,22 +177,27 @@ static uint8_t setpoint_is_valid(const FcuSetpoint *setpoint)
         !nav_isfinite(setpoint->yaw_rate_sp)) {
         return 0u;
     }
-    if (setpoint->motion_enabled) {
-        if (setpoint->preferred_control == FCU_CONTROL_VELOCITY &&
-            (setpoint->valid_mask & FCU_SETPOINT_VALID_VELOCITY) == 0u) {
-            return 0u;
-        }
-        if (setpoint->preferred_control == FCU_CONTROL_ACCELERATION &&
-            (setpoint->valid_mask & FCU_SETPOINT_VALID_ACCELERATION) == 0u) {
-            return 0u;
-        }
-        if (setpoint->preferred_control == FCU_CONTROL_AUTO &&
-            (setpoint->valid_mask & (FCU_SETPOINT_VALID_VELOCITY |
-                                     FCU_SETPOINT_VALID_ACCELERATION)) == 0u) {
-            return 0u;
-        }
+    if (!setpoint->motion_enabled) {
+        return (setpoint->valid_mask == 0u &&
+                setpoint->control_mode == FCU_CONTROL_AUTO &&
+                setpoint->yaw_control == FCU_YAW_CONTROL_NONE) ? 1u : 0u;
     }
-    return 1u;
+    if (!finalized_control_valid(setpoint->control_mode)) return 0u;
+    if (setpoint->control_mode == FCU_CONTROL_VELOCITY &&
+        primary_mask != FCU_SETPOINT_VALID_VELOCITY) {
+        return 0u;
+    }
+    if (setpoint->control_mode == FCU_CONTROL_ACCELERATION &&
+        primary_mask != FCU_SETPOINT_VALID_ACCELERATION) {
+        return 0u;
+    }
+    if (setpoint->yaw_control == FCU_YAW_CONTROL_ANGLE) {
+        return yaw_mask == FCU_SETPOINT_VALID_YAW ? 1u : 0u;
+    }
+    if (setpoint->yaw_control == FCU_YAW_CONTROL_RATE) {
+        return yaw_mask == FCU_SETPOINT_VALID_YAW_RATE ? 1u : 0u;
+    }
+    return 0u;
 }
 
 static uint8_t sequence_newer(uint16_t candidate, uint16_t previous)
@@ -227,6 +258,8 @@ void fcu_bridge_config_default(FcuBridgeConfig *cfg)
         FCU_STATE_VALID_LOCAL_POSITION |
         FCU_STATE_VALID_LOCAL_VELOCITY;
     cfg->preferred_control = FCU_CONTROL_AUTO;
+    cfg->preferred_yaw_control = FCU_YAW_CONTROL_AUTO;
+    cfg->control_frame = FCU_CONTROL_FRAME_LOCAL_XY_Z_UP;
 }
 
 uint8_t fcu_bridge_config_valid(const FcuBridgeConfig *cfg)
@@ -235,7 +268,9 @@ uint8_t fcu_bridge_config_valid(const FcuBridgeConfig *cfg)
         cfg->state_timeout_ms > 2000u || cfg->command_validity_ms == 0u ||
         cfg->command_validity_ms > FCU_LINK_MAX_VALIDITY_MS ||
         (cfg->required_state_mask & ~FCU_STATE_VALID_KNOWN_MASK) != 0u ||
-        !preference_valid(cfg->preferred_control)) {
+        !preference_valid(cfg->preferred_control) ||
+        !yaw_preference_valid(cfg->preferred_yaw_control) ||
+        !control_frame_valid(cfg->control_frame)) {
         return 0u;
     }
     return 1u;
@@ -253,6 +288,7 @@ void fcu_bridge_init(FcuBridge *bridge, const FcuBridgeConfig *cfg)
         bridge->cfg = defaults;
     }
     bridge->status = FCU_BRIDGE_WAITING;
+    fcu_motion_authorization_init(&bridge->motion_authorization);
 }
 
 FcuBridgeStatus fcu_bridge_update(FcuBridge *bridge, uint32_t now_ms)
@@ -265,6 +301,7 @@ FcuBridgeStatus fcu_bridge_update(FcuBridge *bridge, uint32_t now_ms)
         bridge->stale_latched = 0u;
     } else {
         bridge->status = FCU_BRIDGE_STALE;
+        fcu_motion_authorization_revoke(&bridge->motion_authorization);
         if (!bridge->stale_latched) {
             bridge->stats.stale_transitions++;
             bridge->stale_latched = 1u;
@@ -324,9 +361,47 @@ uint8_t fcu_bridge_get_state(FcuBridge *bridge, uint32_t now_ms,
     return 1u;
 }
 
+void fcu_motion_authorization_init(FcuMotionAuthorization *authorization)
+{
+    if (authorization == 0) return;
+    authorization->granted = 0u;
+    authorization->rearm_ready = 1u;
+}
+
+void fcu_motion_authorization_revoke(FcuMotionAuthorization *authorization)
+{
+    if (authorization == 0) return;
+    authorization->granted = 0u;
+    authorization->rearm_ready = 0u;
+}
+
+uint8_t fcu_motion_authorization_update(
+    FcuMotionAuthorization *authorization,
+    uint8_t motion_requested,
+    uint8_t prerequisites_valid)
+{
+    if (authorization == 0 || motion_requested > 1u ||
+        prerequisites_valid > 1u || !prerequisites_valid) {
+        fcu_motion_authorization_revoke(authorization);
+        return 0u;
+    }
+    if (!motion_requested) {
+        authorization->granted = 0u;
+        authorization->rearm_ready = 1u;
+        return 0u;
+    }
+    if (authorization->rearm_ready) {
+        authorization->granted = 1u;
+        authorization->rearm_ready = 0u;
+    }
+    return authorization->granted;
+}
+
 uint8_t fcu_setpoint_from_nav(const GuidanceOutput *guidance,
                               const CtrlOutput *control,
-                              FcuControlPreference preferred_control,
+                              FcuControlPreference control_mode,
+                              FcuYawControlMode yaw_control,
+                              FcuControlFrame control_frame,
                               uint8_t motion_enabled,
                               uint16_t sequence,
                               uint32_t timestamp_ms,
@@ -334,7 +409,10 @@ uint8_t fcu_setpoint_from_nav(const GuidanceOutput *guidance,
                               FcuSetpoint *setpoint)
 {
     if (guidance == 0 || control == 0 || setpoint == 0 ||
-        !preference_valid(preferred_control) || motion_enabled > 1u ||
+        !finalized_control_valid(control_mode) ||
+        (yaw_control != FCU_YAW_CONTROL_ANGLE &&
+         yaw_control != FCU_YAW_CONTROL_RATE) ||
+        !control_frame_valid(control_frame) || motion_enabled > 1u ||
         validity_ms == 0u || validity_ms > FCU_LINK_MAX_VALIDITY_MS) {
         return 0u;
     }
@@ -342,22 +420,30 @@ uint8_t fcu_setpoint_from_nav(const GuidanceOutput *guidance,
     setpoint->sequence = sequence;
     setpoint->source_timestamp_ms = timestamp_ms;
     setpoint->validity_ms = validity_ms;
-    setpoint->preferred_control = preferred_control;
+    setpoint->control_mode = control_mode;
+    setpoint->control_frame = control_frame;
+    setpoint->yaw_control = yaw_control;
     setpoint->motion_enabled = motion_enabled;
-    if (!motion_enabled) return 1u;
+    if (!motion_enabled) {
+        fcu_setpoint_disable(sequence, timestamp_ms, setpoint);
+        return 1u;
+    }
 
-    setpoint->position_sp = guidance->pos_sp;
-    setpoint->velocity_sp = guidance->vel_sp;
-    setpoint->acceleration_sp = guidance->use_accel_sp
-        ? guidance->accel_sp : control->accel_cmd;
-    setpoint->yaw_sp = guidance->yaw_sp;
-    setpoint->yaw_rate_sp = control->yaw_rate_cmd;
-    if (guidance->use_pos_sp)
-        setpoint->valid_mask |= FCU_SETPOINT_VALID_POSITION;
-    setpoint->valid_mask |= FCU_SETPOINT_VALID_VELOCITY |
-        FCU_SETPOINT_VALID_ACCELERATION |
-        FCU_SETPOINT_VALID_YAW |
-        FCU_SETPOINT_VALID_YAW_RATE;
+    if (control_mode == FCU_CONTROL_VELOCITY) {
+        setpoint->velocity_sp = control->velocity_cmd;
+        setpoint->valid_mask |= FCU_SETPOINT_VALID_VELOCITY;
+    } else {
+        setpoint->acceleration_sp = guidance->use_accel_sp
+            ? guidance->accel_sp : control->accel_cmd;
+        setpoint->valid_mask |= FCU_SETPOINT_VALID_ACCELERATION;
+    }
+    if (yaw_control == FCU_YAW_CONTROL_ANGLE) {
+        setpoint->yaw_sp = guidance->yaw_sp;
+        setpoint->valid_mask |= FCU_SETPOINT_VALID_YAW;
+    } else {
+        setpoint->yaw_rate_sp = control->yaw_rate_cmd;
+        setpoint->valid_mask |= FCU_SETPOINT_VALID_YAW_RATE;
+    }
     return setpoint_is_valid(setpoint);
 }
 
@@ -369,25 +455,35 @@ void fcu_setpoint_disable(uint16_t sequence, uint32_t timestamp_ms,
     setpoint->sequence = sequence;
     setpoint->source_timestamp_ms = timestamp_ms;
     setpoint->validity_ms = 1u;
-    setpoint->preferred_control = FCU_CONTROL_AUTO;
+    setpoint->control_mode = FCU_CONTROL_AUTO;
+    setpoint->control_frame = FCU_CONTROL_FRAME_LOCAL_XY_Z_UP;
+    setpoint->yaw_control = FCU_YAW_CONTROL_NONE;
 }
 
 uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
                                  const GuidanceOutput *guidance,
                                  const CtrlOutput *control,
-                                 uint8_t motion_enabled,
+                                 uint8_t motion_authorization_request,
                                  uint32_t now_ms,
                                  FcuSetpoint *setpoint)
 {
     FcuControlPreference selected;
+    FcuYawControlMode selected_yaw;
     uint32_t capabilities;
     if (bridge == 0 || setpoint == 0 ||
         fcu_bridge_update(bridge, now_ms) != FCU_BRIDGE_ACTIVE) {
         return 0u;
     }
+    if (!fcu_motion_authorization_update(&bridge->motion_authorization,
+                                         motion_authorization_request, 1u)) {
+        fcu_setpoint_disable(bridge->next_command_sequence++, now_ms,
+                             setpoint);
+        return 1u;
+    }
     capabilities = bridge->latest_state.capabilities;
     if ((capabilities & FCU_CAP_EXTERNAL_CONTROL) == 0u) {
         bridge->stats.unsupported_commands++;
+        fcu_motion_authorization_revoke(&bridge->motion_authorization);
         return 0u;
     }
 
@@ -399,6 +495,7 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
             selected = FCU_CONTROL_ACCELERATION;
         } else {
             bridge->stats.unsupported_commands++;
+            fcu_motion_authorization_revoke(&bridge->motion_authorization);
             return 0u;
         }
     }
@@ -407,29 +504,39 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
         (selected == FCU_CONTROL_ACCELERATION &&
          (capabilities & FCU_CAP_ACCELERATION_SETPOINT) == 0u)) {
         bridge->stats.unsupported_commands++;
+        fcu_motion_authorization_revoke(&bridge->motion_authorization);
         return 0u;
     }
 
-    if (!fcu_setpoint_from_nav(guidance, control, selected, motion_enabled,
+    selected_yaw = bridge->cfg.preferred_yaw_control;
+    if (selected_yaw == FCU_YAW_CONTROL_AUTO) {
+        if ((capabilities & FCU_CAP_YAW_SETPOINT) != 0u) {
+            selected_yaw = FCU_YAW_CONTROL_ANGLE;
+        } else if ((capabilities & FCU_CAP_YAW_RATE_SETPOINT) != 0u) {
+            selected_yaw = FCU_YAW_CONTROL_RATE;
+        } else {
+            bridge->stats.unsupported_commands++;
+            fcu_motion_authorization_revoke(&bridge->motion_authorization);
+            return 0u;
+        }
+    }
+    if ((selected_yaw == FCU_YAW_CONTROL_ANGLE &&
+         (capabilities & FCU_CAP_YAW_SETPOINT) == 0u) ||
+        (selected_yaw == FCU_YAW_CONTROL_RATE &&
+         (capabilities & FCU_CAP_YAW_RATE_SETPOINT) == 0u)) {
+        bridge->stats.unsupported_commands++;
+        fcu_motion_authorization_revoke(&bridge->motion_authorization);
+        return 0u;
+    }
+
+    if (!fcu_setpoint_from_nav(guidance, control, selected, selected_yaw,
+                               bridge->cfg.control_frame, 1u,
                                bridge->next_command_sequence, now_ms,
                                bridge->cfg.command_validity_ms, setpoint)) {
+        fcu_motion_authorization_revoke(&bridge->motion_authorization);
         return 0u;
     }
     bridge->next_command_sequence++;
-    if (selected == FCU_CONTROL_VELOCITY) {
-        setpoint->valid_mask &= ~FCU_SETPOINT_VALID_ACCELERATION;
-    } else {
-        setpoint->valid_mask &= ~FCU_SETPOINT_VALID_VELOCITY;
-    }
-    if ((capabilities & FCU_CAP_YAW_SETPOINT) != 0u) {
-        setpoint->valid_mask &= ~FCU_SETPOINT_VALID_YAW_RATE;
-    } else if ((capabilities & FCU_CAP_YAW_RATE_SETPOINT) != 0u) {
-        setpoint->valid_mask &= ~FCU_SETPOINT_VALID_YAW;
-    } else {
-        setpoint->valid_mask &= ~(FCU_SETPOINT_VALID_YAW |
-                                  FCU_SETPOINT_VALID_YAW_RATE);
-    }
-    if (!motion_enabled) setpoint->valid_mask = 0u;
     return setpoint_is_valid(setpoint);
 }
 
@@ -597,7 +704,7 @@ FcuLinkResult fcu_link_encode_setpoint(
                   FCU_LINK_SETPOINT_FRAME_SIZE, setpoint->sequence, 0u,
                   setpoint->source_timestamp_ms);
     put_u32(&frame[16], setpoint->valid_mask);
-    frame[20] = (uint8_t)setpoint->preferred_control;
+    frame[20] = (uint8_t)setpoint->control_mode;
     frame[21] = setpoint->motion_enabled;
     put_u16(&frame[22], setpoint->validity_ms);
     if ((setpoint->valid_mask & FCU_SETPOINT_VALID_POSITION) != 0u)
@@ -629,9 +736,17 @@ FcuLinkResult fcu_link_decode_setpoint(const uint8_t *frame, uint16_t size,
     setpoint->sequence = get_u16(&frame[8]);
     setpoint->source_timestamp_ms = get_u32(&frame[12]);
     setpoint->valid_mask = get_u32(&frame[16]);
-    setpoint->preferred_control = (FcuControlPreference)frame[20];
+    setpoint->control_mode = (FcuControlPreference)frame[20];
     setpoint->motion_enabled = frame[21];
     setpoint->validity_ms = get_u16(&frame[22]);
+    setpoint->control_frame = FCU_CONTROL_FRAME_LOCAL_XY_Z_UP;
+    if ((setpoint->valid_mask & FCU_SETPOINT_VALID_YAW) != 0u) {
+        setpoint->yaw_control = FCU_YAW_CONTROL_ANGLE;
+    } else if ((setpoint->valid_mask & FCU_SETPOINT_VALID_YAW_RATE) != 0u) {
+        setpoint->yaw_control = FCU_YAW_CONTROL_RATE;
+    } else {
+        setpoint->yaw_control = FCU_YAW_CONTROL_NONE;
+    }
     if ((setpoint->valid_mask & FCU_SETPOINT_VALID_POSITION) != 0u)
         setpoint->position_sp = get_vec3(&frame[24]);
     if ((setpoint->valid_mask & FCU_SETPOINT_VALID_VELOCITY) != 0u)

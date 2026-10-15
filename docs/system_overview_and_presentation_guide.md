@@ -137,6 +137,8 @@ MissionFsm 决定任务状态与制导模式
     ↓
 位置速度控制器生成 CtrlOutput
     ↓
+NavApp 最终运动授权并生成 FcuSetpoint
+    ↓
 输出状态、事件日志和遥测快照
 ```
 
@@ -247,7 +249,7 @@ EMERGENCY_STABILIZE → EMERGENCY_LAND
 | 基座归航 | 基座相对观测视觉伺服 |
 | 轨迹生成失败 | 时间拉伸、局部绕行或简单限速航点制导 |
 
-`GuidanceOutput` 表示位置、速度、加速度和偏航目标；`CtrlOutput` 是当前主机模型使用的期望加速度和偏航角速度。真实平台路径再把二者包装成 `FcuSetpoint`，由具体飞控适配器选择它真正支持的速度或加速度接口。
+`GuidanceOutput` 表示位置、速度前馈、加速度前馈和偏航目标；`CtrlOutput.velocity_cmd` 是现有位置/速度制导形成的完整导航期望速度，同时保留期望加速度和偏航角速度。正式平台路径由 `NavApp` 的单一授权门把它包装成 `FcuSetpoint`；最终包只允许 velocity/acceleration 和 yaw/yaw-rate 各选一种。定位恢复只恢复计算，必须重新授权才能恢复运动包。
 
 ### 5.7 安全覆盖
 
@@ -563,7 +565,7 @@ FCU state link recovered
 
 ### “导航最后到底发速度还是加速度？”
 
-内部同时保留 `GuidanceOutput` 和 `CtrlOutput`。外部飞控适配器优先选择飞控原生支持的速度接口；只有明确支持外部加速度目标时才使用加速度。不能同时让导航和飞控重复实现同一个速度环。
+内部同时保留 `GuidanceOutput` 和 `CtrlOutput`，当前 `NavApp` 默认输出 `CtrlOutput.velocity_cmd`。若真实飞控只明确支持外部加速度目标，可在桥接能力选择中改用加速度；最终包不允许同时声明速度和加速度。具体模式必须在飞控适配层验证，不能同时让导航和飞控重复实现同一个速度环。
 
 ### “为什么一定要状态机？”
 

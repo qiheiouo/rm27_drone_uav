@@ -27,6 +27,8 @@ typedef struct {
     uint8_t start;
     uint8_t request_return;
     uint8_t request_emergency;
+    /* Explicit host-side motion request; it is not FCU armed feedback. */
+    uint8_t motion_authorization_request;
 } NavMissionCommand;
 
 typedef struct {
@@ -64,7 +66,8 @@ int nav_swarm_frame_write(const uint8_t *frame, uint16_t size);
  * copy/enqueue the command before returning and must never block.
  */
 int nav_fcu_setpoint_write(const FcuSetpoint *setpoint);
-void nav_fcu_set_armed(uint8_t armed);
+/* Receives the final host authorization state, not actual FCU armed state. */
+void nav_fcu_set_motion_authorized(uint8_t authorized);
 void nav_log(const char *msg);
 
 /*

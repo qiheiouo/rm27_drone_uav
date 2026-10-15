@@ -61,6 +61,7 @@
 | 最终上层计算平台 | `待确认` | STM32 与 ARM Linux 均保留；RK3566 只是 ARM Linux 候选 |
 | 主定位来源 | `待确认` | 可能来自飞控融合、外部 VIO 或其他来源；必须只有一个活动主状态 |
 | FlightState 最小输入契约 | `Frozen / Sim-verified` | 已实现外部融合状态直通、静态单一来源、超时/无效拒绝和恢复；未接真实定位设备 |
+| FlightCommand 最小输出契约 | `Frozen / Sim-verified` | `FcuSetpoint` 为唯一结构；显式速度/加速度、yaw/yaw-rate、local z-up、时效和边沿重授权；未接真实飞控 |
 | MicoAir MicoVIO | `待确认` | 只是外部 VIO 候选，不进入核心依赖 |
 | 飞控与上层协议 | `待确认` | PX4/MAVLink 是重点候选；现有 `RMFC` 是参考编码，不是真实驱动 |
 | 外部视觉数据契约 | `Draft` | 需要视觉组确认二维/三维、坐标系、时间戳、速率、置信度和速度字段 |
@@ -83,15 +84,21 @@
 
 ### 4.2 第一阶段进度与后续最小修改
 
-已完成并通过主机测试：`FlightState` 最小字段与坐标/时间约定、`NavRuntimeConfig.flight_state_source` 静态互斥选择、外部状态直达 `NavState`、超时/无效/非有限值/双来源拒绝、定位恢复，以及原 SIL 路径兼容。
+已完成并通过主机测试：
+
+- `FlightState` 最小字段与坐标/时间约定、`NavRuntimeConfig.flight_state_source` 静态互斥选择、外部状态直达 `NavState`、超时/无效/非有限值/双来源拒绝和定位恢复；
+- `FlightCommand` 复用 `FcuSetpoint`，最终主控制模式和航向模式互斥，内部 frame 固定为 local XY、Z-up；
+- `CtrlOutput.velocity_cmd` 表示导航期望速度，`NavApp` 通过唯一 `FcuMotionAuthorization` 门后才形成已授权命令；
+- 定位/必需输入失效会清零旧期望、重置目标相关状态并撤销授权，定位恢复不会自动恢复运动，必须先撤销请求再重新授权；
+- 命令过期、NaN/Inf、模式不匹配、任务侧撤销/重启和同周期故障竞争已有主机测试；原 SIL 计算与动力学链保持兼容。
 
 后续仍需：
 
 1. 为外部三维目标观测增加不经过 `camera_reconstruct_nav` 的正式输入路径，并保留 `PixelObs` 兼容路径。
 2. 硬件选型后把一个真实状态适配器接到 `nav_flight_state_read()`；自动来源切换仍未设计，不得自行增加。
 3. 将 `FcuStateSnapshot` 的接收、过期和能力判断接入所选平台；融合状态优先使用 `fcu_state_to_flight_state()`，不要再送入惯性积分器。
-4. 将 `FcuSetpoint` 明确为唯一导航指令出口，补充命令来源、授权/模式和失效动作的契约。
-5. 为未来 ARM Linux 和真实平台适配器复用现有主机契约向量。
+4. 硬件选型后把已冻结的 `FcuSetpoint` 映射到一种真实飞控协议，并验证能力、接受/执行反馈和 Failsafe；不得把主机命令生成描述为飞控已经执行。
+5. 为未来 ARM Linux 和真实平台适配器复用现有 FlightState/FlightCommand 主机契约向量。
 
 ### 4.3 硬件确定后才能开发
 
@@ -155,7 +162,7 @@ RK3566 等 ARM Linux 板适合复杂通信、外部 VIO SDK、日志和多进程
 
 ### Phase 1：平台无关接口测试
 
-状态：`进行中`。FlightState 子阶段已 `Sim-verified`；TargetObservation 与 FlightCommand 子阶段尚未开始。
+状态：`进行中`。FlightState 与 FlightCommand 子阶段已 `Sim-verified`；TargetObservation 子阶段尚未开始。
 
 目标：在不接硬件的情况下冻结 FlightState、TargetObservation、FlightCommand 的最小字段、所有权和失效语义。
 
@@ -231,9 +238,8 @@ RK3566 等 ARM Linux 板适合复杂通信、外部 VIO SDK、日志和多进程
 
 1. 与视觉组冻结最小 TargetObservation 契约并取得可重放样本；至少确认二维/三维类型、frame、时间、有效性和丢失语义。
 2. 在上述契约确定后增加与 `PixelObs` 互斥的直通入口，证明不会重复三维重建。
-3. 以现有 `FcuSetpoint` 为基础冻结 FlightCommand 的控制模式、授权、时间和超时语义。
-4. 为 TargetObservation 和 FlightCommand 补齐纯主机契约测试；FlightState 已有对应测试。
-5. 硬件选型后再实现一个真实飞控/平台适配器，先只读状态和无运动验证。
+3. 为 TargetObservation 补齐纯主机契约测试；FlightState 与 FlightCommand 已有对应测试。
+4. 硬件选型后再实现一个真实飞控/平台适配器，先只读状态和无运动验证，再验证命令接受、超时和失联行为。
 
 ## 8. 历史研究的处理
 

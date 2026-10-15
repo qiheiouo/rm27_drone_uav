@@ -2,7 +2,7 @@
 
 评审日期：2026-10-15
 
-评审范围：当前 `main` 的 C99 源码、CMake 目标、主机仿真、STM32 候选适配、测试与相关技术文档。FlightState 第一阶段已经实现；TargetObservation、FlightCommand 和真实通信仍保持设计或待确认状态。
+评审范围：当前 `main` 的 C99 源码、CMake 目标、主机仿真、STM32 候选适配、测试与相关技术文档。FlightState 与 FlightCommand 第一阶段已经实现并通过主机验证；TargetObservation 和真实通信仍保持设计或待确认状态。
 
 ## 1. 结论摘要
 
@@ -13,10 +13,10 @@
 1. `NavRuntimeInput` 的目标入口只有 `PixelObs`，核心在 `nav_runtime_step()` 内按目标尺寸重建三维位置；外部视觉若已经提供三维位置，没有正式直通入口。
 2. `FlightState` 现已作为最小外部融合状态契约进入 `NavApp` 与 `NavRuntime`；静态配置保证它与原有内部估计链互斥，外部状态不会再次进入惯性积分器。
 3. 当前只支持启动时选择来源，不支持自动切换；真实状态适配器、接收时间/时钟同步和可比较质量仍等待硬件与定位方案确认。
-4. `FcuSetpoint` 已很接近统一 `FlightCommand`，但 `NavApp` 直接以 `FCU_CONTROL_AUTO` 生成命令，尚未消费真实飞控能力、活动状态或控制授权反馈。
+4. `FcuSetpoint` 已扩展为统一 `FlightCommand`：最终命令显式选择 velocity/acceleration 与 yaw/yaw-rate，固定内部 local XY、Z-up 坐标，并由 `NavApp` 的单一授权门决定是否产生运动包。
 5. 仓库只有 `platform/host/` 与 `platform/stm32/`；ARM Linux 适配层尚不存在，不能把“可以新增”写成“已经支持”。
 
-因此下一步应优先冻结三个接口的字段和所有权，再做最小适配，不应重构现有核心。
+下一阶段只应继续 TargetObservation 契约与直通入口；真实飞控能力、坐标转换、实际接受/执行反馈和 Failsafe 仍等待硬件选型，不应在核心中猜测。
 
 ## 2. 当前构建与依赖边界
 
@@ -26,7 +26,7 @@
 - `nav_sim`：动力学、传感器、场景和故障注入，只供主机使用；
 - `nav_stm32_port`：`platform/stm32/nav_tasks.c` 装配骨架；
 - `mission_sim`、`swarm_sim`、`nav_replay`、`nav_telemetry_dump`、`fcu_bridge_sim`：主机程序；
-- 测试目标：当前 CTest 清单 83 项。
+- 测试目标：当前 CTest 清单 84 项。
 
 主机专用的 `stdio`、文件读写和命令行只出现在 `platform/host/` 与测试。`simulation/` 不应进入真实平台。`platform/stm32/nav_platform.h` 只声明板级函数，没有包含 STM32 HAL；因此它能在主机用桩编译，但其命名和函数集合仍是 STM32 候选装配，不是通用 Linux 接口。
 
@@ -53,16 +53,18 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
   + nav_camera_target_read + nav_camera_home_read + 其他输入
   → NavRuntimeInput
   → nav_runtime_step()
-  → fcu_setpoint_from_nav(..., FCU_CONTROL_AUTO, ...)
+  → CtrlOutput.velocity_cmd（导航期望速度）
+  → FcuMotionAuthorization（唯一最终授权门）
+  → fcu_setpoint_from_nav(..., explicit mode/frame, ...)
   → nav_fcu_setpoint_write()
 ```
 
-失败时 `nav_app_disable_fcu()` 发送禁用 setpoint，并调用 `nav_fcu_set_armed(0)`。成功时发送 setpoint 后调用 `nav_fcu_set_armed(runtime.output.armed)`。
+`NavMissionCommand.motion_authorization_request` 是任务/平台侧授权请求。`NavApp` 只有在本周期运行时有效、任务处于运动状态且授权边沿有效时，才生成 `motion_enabled=1` 的最终包。定位、必需输入、命令数值或发送前置条件失效都会撤销授权并生成禁用包；恢复后持续为高的旧请求不能自动恢复，必须先拉低再重新拉高。`nav_fcu_set_motion_authorized()` 只报告主机最终授权状态，不表示飞控真实 armed 或已经执行。
 
 这是一个固定内存、非阻塞意图明确的骨架，但存在两个关键事实：
 
 - 它按 `flight_state_source` 只读取内部 Flow 路径或外部 `FlightState` 路径；真实 `FcuBridge`/MAVLink 接收任务仍未实现；
-- `nav_fcu_set_armed()` 的名称混合了“导航请求”和“飞控真实 armed 状态”，后续协议冻结时必须澄清，不应让导航覆盖飞控最终权限。
+- 禁用包、零速度和停止发送在具体飞控上的效果尚未验证；当前实现只证明主机撤销了运动授权。
 
 ### 3.3 核心输入处理
 
@@ -81,7 +83,7 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
 3. 外部模式验证 `FlightState` 后直接形成 `NavState`，跳过 `estimator_update()`；原始 IMU 仅继续服务碰撞检测等独立安全逻辑；
 4. 将 `PixelObs` 通过 `camera_reconstruct_nav()` 转成 `TargetObs`；
 5. 调用 `target_tracker_update()`、任务、安全、规划、制导和位置控制；
-6. 输出 `GuidanceOutput` 与 `CtrlOutput`。
+6. 输出 `GuidanceOutput` 与 `CtrlOutput`；`CtrlOutput.velocity_cmd` 是位置/速度制导经现有位置环得到的完整导航期望速度。
 
 外部融合飞行状态已能直接替代核心估计器输出；外部三维目标状态仍未直接进入主链。
 
@@ -115,14 +117,14 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
 相关现有类型：
 
 - `GuidanceOutput`：位置、速度、加速度、yaw 和选择标志；
-- `CtrlOutput`：当前内部位置控制器产生的加速度与 yaw rate；
-- `FcuSetpoint`：序号、生成时间、有效字段、位置/速度/加速度、yaw/yaw rate、有效期、控制偏好和 `motion_enabled`。
+- `CtrlOutput`：当前内部位置控制器产生的完整速度命令、加速度与 yaw rate；
+- `FcuSetpoint`：序号、生成时间、有效字段、速度/加速度、yaw/yaw rate、有效期、显式控制模式、显式内部坐标系和 `motion_enabled`。
 
-结论：`FcuSetpoint` 已经满足大部分 `FlightCommand` 要求，应作为统一外部指令的基础，不需要再复制一个命令结构。需要冻结的是：`motion_enabled` 的授权语义、唯一命令所有者、飞控能力选择、过期动作、模式反馈和导航请求与飞控实际 armed 状态的区别。
+结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一边沿授权原语。真实飞控能力选择、实际控制模式反馈、接受/执行状态和过期动作仍等待适配器与硬件验证。
 
 ## 5. 三类接口契约
 
-FlightState 为第一阶段已实现基线；TargetObservation 与 FlightCommand 仍是后续设计建议。
+FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation 仍是后续设计建议。
 
 | 项目 | 当前状态 |
 |---|---|
@@ -131,7 +133,8 @@ FlightState 为第一阶段已实现基线；TargetObservation 与 FlightCommand
 | 真实 FCU/VIO 状态适配器 | `等待硬件与定位选型` |
 | 自动定位源切换 | `设计预留，未实现` |
 | TargetObservation 直通 | `设计预留，未实现` |
-| FlightCommand/真实飞控 Failsafe | `设计预留 / 等待飞控选型` |
+| FlightCommand 契约与主机授权门 | `Frozen / Sim-verified` |
+| 真实飞控接受/执行反馈与 Failsafe | `等待飞控选型与硬件验证` |
 
 ### 5.1 FlightState 语义
 
@@ -172,23 +175,28 @@ FlightState 为第一阶段已实现基线；TargetObservation 与 FlightCommand
 
 ### 5.3 FlightCommand 语义
 
-以 `FcuSetpoint` 为基础：
+状态：`Frozen / Sim-verified（主机命令生成与参考字节流）`。
 
-| 字段 | 要求 |
+| 字段/规则 | 已实现语义 |
 |---|---|
-| 速度 | 当前首选外部控制量，三维、SI 单位 |
-| 航向 | 飞控确认后选择 yaw 或 yaw rate，不能同时含糊生效 |
-| 生成时间/有效期 | 超时后飞控侧停止沿用最后命令 |
-| 控制模式 | velocity/acceleration/position 只选飞控明确支持的一种主模式 |
-| `motion_enabled` | 表示导航是否授权本条运动，不代表飞控已经解锁 |
-| 序号/来源 | 支持重复、乱序、重启与诊断 |
-| 失效动作 | 由飞控/平台适配器实现，导航只发禁用或停止授权 |
+| `velocity_sp` | `CtrlOutput.velocity_cmd` 经授权后的三维目标速度，m/s |
+| 主控制模式 | 最终运动包只能是 `VELOCITY` 或 `ACCELERATION`；`AUTO` 只能用于桥接能力选择，不能出现在已授权运动包中 |
+| 航向模式 | 最终运动包只能选择 `ANGLE` 或 `RATE`，对应有效位互斥；禁用包为 `NONE` |
+| `control_frame` | 当前只接受 `LOCAL_XY_Z_UP`；PX4 NED/FRD 转换只能在未来飞控适配层完成 |
+| `source_timestamp_ms` | 主机生成时刻；接收端新鲜度使用本地接收时刻加 `validity_ms` 判断，避免假定两端时钟已同步 |
+| `motion_enabled` | 已通过主机最终授权门；不表示飞控 armed、接受或执行 |
+| 禁用包 | `motion_enabled=0`、`valid_mask=0`、1 ms 有效期；其真实飞控效果待验证 |
+| 数值检查 | 有效字段必须有限；NaN/Inf、模式/有效位不匹配、未知 frame 均拒绝成为运动包 |
 
-所有权：`NavRuntime` 是任务级运动意图的唯一生产者；命令适配器只做能力选择、坐标/单位/协议转换和更严格的禁用；飞控拥有最终低层控制、解锁、限幅和失联动作。安全员人工停桨由安全员和独立飞控链路负责，不属于本导航软件实现；导航仍负责状态有效性、围栏/输出约束和故障后的停止授权。具体飞控失联、悬停、降落或停桨动作在实测前均为待确认。
+正式链路只有一处最终主机授权：`NavApp::motion_authorization`。授权成立需同时满足本周期 FlightState/必需输入有效、`NavRuntimeOutput.step_valid`、任务处于运动状态、命令模式/数值合法以及新的 `motion_authorization_request` 上升沿。任何前置条件失败都会撤销授权；恢复定位只恢复计算能力，不恢复授权。撤销后必须观察到一次低请求，后续新高请求才能重新授权。同周期故障与新高请求竞争时故障优先。
+
+定位输入被拒绝时，任务 FSM 保留原状态，不会在该失败周期进入 `MS_ESTIMATOR_LOST`；旧实现的制导/目标内部状态也可能被保留。当前实现会清零导航期望速度/控制、重置目标跟踪和末端制导状态，并由 `NavApp` 撤销最终授权。下一有效定位到来后，FSM 仍可继续原任务并重新计算期望速度，但没有新授权边沿只能发送禁用包。因此“定位恢复”与“恢复运动”已分离。
+
+任务侧把授权请求拉低可立即撤销后续运动包，再拉高可显式重新启动运动授权；它不会擅自把任务 FSM 重置到停机、悬停或降落状态，因为这些动作依赖真实飞控语义。安全员人工停桨由安全员和独立飞控链路负责；导航仍负责状态有效性、边界/输出约束和故障后的停止授权。具体飞控收到禁用包、零速度、超时或停止发送后会悬停、降落还是停机，在实测前均为待确认。
 
 ## 6. 坐标、时间和单位建议
 
-状态：FlightState 内部契约为 `Frozen`；外部视觉与具体飞控坐标映射仍为 `Draft / 待确认`。
+状态：FlightState 与 FlightCommand 内部契约为 `Frozen`；外部视觉与具体飞控坐标映射仍为 `Draft / 待确认`。
 
 - 内部导航局部系建议使用右手 z-up，SI 单位；初始化 +X 的任务含义需由场地/任务配置给出。
 - 机体系建议右手 FLU（+X 前、+Y 左、+Z 上）；若飞控使用 NED/FRD，只能在飞控适配器中转换。
@@ -207,7 +215,9 @@ FlightState 为第一阶段已实现基线；TargetObservation 与 FlightCommand
 | 视觉外参/坐标归一化 | TargetObservationAdapter | 核心不解析相机/通信协议 |
 | 主飞行状态选择 | FlightStateProvider | 其他来源只能作为候选/备用 |
 | 任务状态、规划和末端制导 | NavRuntime | 平台不得再并行运行另一套任务制导 |
-| 最终导航运动指令 | FlightCommandOwner（由 NavRuntime 输出形成） | 适配器只能转换或禁用 |
+| 导航期望速度 | `NavRuntime` / `CtrlOutput.velocity_cmd` | 平台不得另算任务级速度 |
+| 最终主机运动授权与 `FcuSetpoint` | `NavApp::motion_authorization` | 适配器只能转换或更严格地禁用 |
+| 飞控接受/执行的运动 | 真实飞控 | 当前主机代码没有执行反馈，不得宣称已执行 |
 | 姿态、角速度、电机和实际 armed | 飞控 | 导航只能请求或读取状态 |
 | 人工紧急停桨 | 安全员与独立飞控链路 | 导航接收中止结果，不实现遥控逻辑 |
 
@@ -251,7 +261,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 不需要整体迁移 C++。保留 C99 核心的理由：
 
-- 现有算法和 83 项测试都围绕该 ABI；
+- 现有算法和 84 项测试都围绕该 ABI；
 - 固定内存和有界行为适合 MCU，也能作为 Linux 上的稳定库；
 - 当前缺口是接口和数据所有权，不是语言表达能力；
 - 整体迁移会制造大范围差异，却不解决硬件、坐标、时间和协议不确定性。
@@ -274,8 +284,8 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 3. 覆盖采样时间、接收时间、32 位回绕、过期、重复、倒序和来源重启。
 4. 同一目标分别以 pixel 兼容路径和已知三维路径输入，验证不会重复重建；视觉组实际三维样本走回放测试。
 5. 同一周期两种主状态的拒绝已覆盖；两种目标输入互斥留待 TargetObservation 阶段。
-6. 检查 `FcuSetpoint` 的速度/yaw、有效期、`motion_enabled`、序号和禁用包在不同适配器编码后语义一致。
-7. 飞控状态过期、命令队列拒绝、外部中止输入和进程/链路重启后，导航不继续授权旧运动命令。
+6. 已检查 `FcuSetpoint` 的速度/yaw 互斥模式、frame、有效期、非有限值、`motion_enabled`、序号和禁用包参考编解码。
+7. 已检查 FlightState 失效、恢复但未重新授权、重新授权、任务侧撤销/重启、同周期故障竞争和桥接链路重同步；真实飞控队列、进程重启和 Failsafe 仍需 HIL/台架。
 
 这些测试先在主机运行；只有真实协议和硬件确定后才增加 SIL/HIL。不能用适配器桩测试替代实物通信证据。
 
@@ -303,7 +313,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 ### 6. 如何设计统一速度控制输出？
 
-复用 `FcuSetpoint` 作为 FlightCommand 基础，默认冻结“速度 + yaw/yaw rate 二选一 + 生成时间 + 有效期 + motion_enabled”。适配器按真实飞控能力映射，不能同时重复闭合速度和加速度环；过期与失联由飞控最终处理。
+复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一边沿授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。过期与失联后的真实动作由飞控最终处理，当前只验证主机不继续授权。
 
 ### 7. STM32 与 ARM Linux 各需要什么？
 
@@ -319,14 +329,14 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 
 ### 10. 当前结构性迁移阻碍是什么？
 
-依严重性排序：目标只有像素正式入口；真实 FlightState 适配器尚不存在；命令能力/授权未与真实飞控状态闭合；外部设备时钟同步未实现；Linux 适配不存在；自动来源切换尚未设计。FlightState 的最小坐标、四元数、静态所有权和失效测试已完成。
+依严重性排序：目标只有像素正式入口；真实 FlightState 适配器尚不存在；FlightCommand 尚未与真实飞控能力、armed/接受/执行反馈和 Failsafe 闭合；外部设备时钟同步未实现；Linux 适配不存在；自动来源切换尚未设计。FlightState 与 FlightCommand 的主机契约、静态所有权和失效测试已完成。
 
 ## 12. 改造分类
 
 ### 可以保留不动
 
 - C99 `nav_core` 与算法实现；
-- `NavState`、`TargetTrack`、`GuidanceOutput`、`CtrlOutput` 的内部用途；
+- `NavState`、`TargetTrack`、`GuidanceOutput`、`CtrlOutput` 的内部用途；`CtrlOutput` 仅增加完整速度命令字段；
 - `FcuStateSnapshot` / `FcuSetpoint` 的大部分字段和参考测试；
 - 主机仿真、故障注入、回放、遥测和现有测试；
 - 撞击恢复、停靠和多机代码作为保留资产。
@@ -335,8 +345,8 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 
 - 让规范化 `TargetObs` 正式进入 `NavRuntimeInput`，并与 `PixelObs` 互斥；
 - 硬件选型后把一个 FcuBridge/VIO 适配器接到已存在的 `nav_flight_state_read()`；
-- 澄清/替换 `nav_fcu_set_armed` 的请求语义，避免冒充飞控真实状态；
-- 让命令生成使用飞控能力与活动状态；
+- 将未来平台实现接到 `nav_fcu_set_motion_authorized`，不得把它映射成飞控真实 armed 反馈；
+- 让真实命令适配器消费飞控能力与活动状态，并提供接受/执行反馈；
 - 为真实适配器补充外部 frame 转换、采样/接收时间和接口一致性测试；
 
 ### 硬件确定后才能开发
@@ -356,7 +366,7 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 
 ## 13. 验证边界
 
-当前 83 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、FlightState 直通/失效处理和组合逻辑。它们不能证明：
+当前 84 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、FlightState 直通/失效处理、FlightCommand 最终主机授权和组合逻辑。它们不能证明：
 
 - STM32 或 ARM Linux 的资源和实时性；
 - 任一真实 VIO、视觉模块或飞控兼容；

@@ -32,8 +32,9 @@
 当前结论：
 
 - C99 固定内存算法核心与 `NavRuntime` 调用链：`Implemented / Sim-verified`；
-- 主机闭环、故障注入、回放、遥测和 83 项 CTest 清单：`Implemented / Sim-verified`；
+- 主机闭环、故障注入、回放、遥测和 84 项 CTest 清单：`Implemented / Sim-verified`；
 - `FlightState` 最小契约、静态单一来源选择、外部状态直通与失效恢复：`Implemented / Sim-verified`；
+- `FlightCommand` 最小契约、单一最终主机授权、失效撤销与显式重授权：`Implemented / Sim-verified`；
 - STM32 `NavApp` 和板级函数：`Implemented` 的候选骨架，未做目标板与实机验证；
 - ARM Linux（例如 RK3566）上层平台：`待确认`，仓库尚无对应适配层；
 - 外部 VIO（例如 MicoAir MicoVIO）：`待确认`，不是导航核心必需依赖；
@@ -50,7 +51,7 @@
 | 任务与制导 | 19 个任务状态、目标丢失处理、末端制导、返航、停靠和紧急降落 |
 | 撞击处理 | 撞击检测、视觉保持、姿态恢复、速度阻尼、估计器检查和脱离；属于保留资产，不代表已经完成真实撞击验证 |
 | 轨迹与安全 | 固定容量轨迹、限速限加速度、围栏、输入时效、watchdog、控制饱和和碰撞风险处理 |
-| FCU 契约 | `FcuStateSnapshot`、`FcuSetpoint`、参考字节流、序号/CRC/超时与断线回归；尚未接入具体飞控 |
+| FCU 契约 | `FcuStateSnapshot`、唯一 `FcuSetpoint`/FlightCommand、显式控制与航向模式、local z-up、边沿授权、参考字节流和断线回归；尚未接入具体飞控 |
 | 多机扩展 | 可关闭的邻机状态、未来冲突和失联保护；不属于当前最优先主线 |
 | 诊断与复现 | 固定内存事件环、二进制遥测、CSV 回放和确定性故障注入 |
 
@@ -62,7 +63,7 @@
 
 - 飞行状态：第一阶段 `FlightState` 契约已冻结为局部右手 z-up、SI 单位、body-to-nav WXYZ 四元数和导航本地单调毫秒时间；`NavRuntimeConfig.flight_state_source` 在启动时互斥选择原有内部估计链或外部融合状态。真实定位适配、时钟同步和硬件验证仍待选型。
 - 目标观测：`TargetObs` 已接近三维相对目标接口，但 `NavRuntimeInput` 目前只正式接收 `PixelObs` 并在核心内重建三维位置；外部视觉已提供三维结果时会缺少无重复重建的入口。
-- 飞行指令：`FcuSetpoint` 已包含位置/速度/加速度、航向、有效期和运动使能，可作为未来 `FlightCommand` 的主要复用对象；真实飞控能力与控制授权仍需适配层确认。
+- 飞行指令：`FcuSetpoint` 已是统一 `FlightCommand`。`CtrlOutput.velocity_cmd` 是导航期望速度，`NavApp` 是正式链路的最终主机授权所有者；velocity/acceleration 与 yaw/yaw-rate 分别互斥，内部 frame 固定为 local XY、Z-up，定位恢复必须经过新的低→高授权边沿才能重新发送运动包。真实飞控能力、NED/FRD 转换、armed/接受/执行反馈和 Failsafe 仍待适配与硬件验证。
 
 详细证据、数据所有权和最小改造清单见[软件架构与平台无关化评审](docs/architecture.md)。
 
@@ -99,7 +100,7 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 .\build\fcu_bridge_sim.exe
 ```
 
-当前 CTest 清单为 83 项，覆盖模块、运行时输入健康、FlightState 外部直通与恢复、故障注入、回放与遥测、FCU 参考桥、STM32 装配桩、多机网络和随机场景。这个数字只描述当前测试清单；测试通过只能支持 `Sim-verified`，不能支持“已在硬件验证”或“正式可部署”。
+当前 CTest 清单为 84 项，覆盖模块、运行时输入健康、FlightState 外部直通与恢复、FlightCommand 授权/过期/非法值/故障竞争、故障注入、回放与遥测、FCU 参考桥、STM32 装配桩、多机网络和随机场景。这个数字只描述当前测试清单；测试通过只能支持 `Sim-verified`，不能支持“已在硬件验证”或“正式可部署”。
 
 ## 目录边界
 

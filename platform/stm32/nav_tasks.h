@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include "nav_runtime.h"
+#include "fcu_bridge.h"
 #include "swarm_link.h"
 
 #ifndef NAV_APP_TELEMETRY_PERIOD_STEPS
@@ -12,6 +13,14 @@
 
 #ifndef NAV_APP_FCU_COMMAND_VALIDITY_MS
 #define NAV_APP_FCU_COMMAND_VALIDITY_MS 100u
+#endif
+
+#ifndef NAV_APP_FCU_CONTROL_MODE
+#define NAV_APP_FCU_CONTROL_MODE FCU_CONTROL_VELOCITY
+#endif
+
+#ifndef NAV_APP_FCU_YAW_CONTROL
+#define NAV_APP_FCU_YAW_CONTROL FCU_YAW_CONTROL_ANGLE
 #endif
 
 #ifndef NAV_APP_SWARM_RX_BUDGET
@@ -35,7 +44,9 @@ typedef struct {
     uint32_t telemetry_sequence;
     uint32_t telemetry_step_count;
     uint32_t fcu_tx_drops;
+    uint32_t fcu_command_rejections;
     uint16_t fcu_command_sequence;
+    FcuMotionAuthorization motion_authorization;
     SwarmPeerRegistry swarm_peers;
     uint32_t swarm_decode_errors;
     uint32_t swarm_tx_drops;

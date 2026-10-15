@@ -20,6 +20,7 @@ typedef struct {
 } GuidanceOutput;
 
 typedef struct {
+    Vec3f velocity_cmd;
     Vec3f accel_cmd;
     float yaw_rate_cmd;
 } CtrlOutput;

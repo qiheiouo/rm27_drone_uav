@@ -81,7 +81,7 @@ int nav_fcu_setpoint_write(const FcuSetpoint *setpoint)
     return 0;
 }
 
-void nav_fcu_set_armed(uint8_t armed) { (void)armed; }
+void nav_fcu_set_motion_authorized(uint8_t armed) { (void)armed; }
 void nav_log(const char *msg) { (void)msg; }
 int nav_telemetry_write(const uint8_t *frame, uint16_t size)
 {
