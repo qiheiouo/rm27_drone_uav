@@ -7,7 +7,9 @@ static float valid_dt(float dt)
 
 static void update_output_health(StateEstimator *est)
 {
-    est->out.mode = est->cfg.mode;
+    if (est->out.mode != EST_MODE_EXTERNAL) {
+        est->out.mode = est->cfg.mode;
+    }
     switch (est->out.status) {
     case EST_TRACKING:
     case EST_RELOCALIZED:

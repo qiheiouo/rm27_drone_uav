@@ -21,6 +21,7 @@
 #include "swarm_avoidance.h"
 #include "swarm_link_guard.h"
 #include "nav_event_log.h"
+#include "flight_state.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,7 +40,8 @@ enum {
     NAV_CONFIG_ERROR_OBSTACLE = 1u << 8,
     NAV_CONFIG_ERROR_CAMERA = 1u << 9,
     NAV_CONFIG_ERROR_ROUTE = 1u << 10,
-    NAV_CONFIG_ERROR_SWARM = 1u << 11
+    NAV_CONFIG_ERROR_SWARM = 1u << 11,
+    NAV_CONFIG_ERROR_STATE_SOURCE = 1u << 12
 };
 
 enum {
@@ -61,15 +63,24 @@ enum {
     NAV_INPUT_SOURCE_FLOW = 1u << 1,
     NAV_INPUT_SOURCE_ODOMETRY = 1u << 2,
     NAV_INPUT_SOURCE_TARGET = 1u << 3,
-    NAV_INPUT_SOURCE_HOME = 1u << 4
+    NAV_INPUT_SOURCE_HOME = 1u << 4,
+    NAV_INPUT_SOURCE_FLIGHT_STATE = 1u << 5
 };
 
-#define NAV_TIMESTAMPED_INPUT_COUNT 5u
+#define NAV_TIMESTAMPED_INPUT_COUNT 6u
+
+typedef enum {
+    /* Existing IMU + Flow/Odom + estimator path, including host SIL. */
+    NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR = 0,
+    /* A fused FlightState is authoritative and bypasses estimator_update(). */
+    NAV_FLIGHT_STATE_EXTERNAL
+} NavFlightStateSource;
 
 typedef struct {
     uint32_t imu_max_age_ms;
     uint32_t flow_max_age_ms;
     uint32_t odometry_max_age_ms;
+    uint32_t flight_state_max_age_ms;
     uint32_t vision_max_age_ms;
     uint32_t future_tolerance_ms;
     uint32_t max_cycle_gap_ms;
@@ -91,6 +102,7 @@ typedef struct {
 typedef struct {
     MissionConfig mission;
     EstimatorConfig estimator;
+    NavFlightStateSource flight_state_source;
     ImpactDetectorConfig impact;
     ImpactFusionConfig impact_fusion;
     ImpactRecoveryConfig recovery;
@@ -125,6 +137,7 @@ typedef struct {
 typedef struct {
     uint32_t timestamp_ms;
     const ImuSample *imu;
+    const FlightState *flight_state;
     const FlowFrame *flow;
     const OdomSample *odometry;
     float tof_height;
@@ -160,6 +173,7 @@ typedef struct {
     AgentState swarm_self;
     NavRuntimeHealth health;
     uint32_t event_flags;
+    NavFlightStateSource flight_state_source;
     uint8_t recovery_active;
     uint8_t trajectory_active;
     uint8_t trajectory_valid;

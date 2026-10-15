@@ -2,7 +2,7 @@
 
 评审日期：2026-10-15
 
-评审范围：当前 `main` 的 C99 源码、CMake 目标、主机仿真、STM32 候选适配、测试与相关技术文档。本轮只给出设计结论和最小改造清单，不修改算法实现、运行参数或通信驱动。
+评审范围：当前 `main` 的 C99 源码、CMake 目标、主机仿真、STM32 候选适配、测试与相关技术文档。FlightState 第一阶段已经实现；TargetObservation、FlightCommand 和真实通信仍保持设计或待确认状态。
 
 ## 1. 结论摘要
 
@@ -11,8 +11,8 @@
 真正阻碍平台迁移的不是语言，而是接口尚未完全闭合：
 
 1. `NavRuntimeInput` 的目标入口只有 `PixelObs`，核心在 `nav_runtime_step()` 内按目标尺寸重建三维位置；外部视觉若已经提供三维位置，没有正式直通入口。
-2. `FcuStateSnapshot`、`FcuBridge` 和 `fcu_state_to_nav_samples()` 已存在，但 `platform/stm32/nav_tasks.c` 没有把它们接入 `NavApp` 主循环；文档描述的状态桥仍主要停留在契约和独立测试层。
-3. 现有 `NavState` 能表达核心飞行状态，但没有“唯一主状态来源、来源切换、坐标标识、采样时间与质量”的完整外部契约。
+2. `FlightState` 现已作为最小外部融合状态契约进入 `NavApp` 与 `NavRuntime`；静态配置保证它与原有内部估计链互斥，外部状态不会再次进入惯性积分器。
+3. 当前只支持启动时选择来源，不支持自动切换；真实状态适配器、接收时间/时钟同步和可比较质量仍等待硬件与定位方案确认。
 4. `FcuSetpoint` 已很接近统一 `FlightCommand`，但 `NavApp` 直接以 `FCU_CONTROL_AUTO` 生成命令，尚未消费真实飞控能力、活动状态或控制授权反馈。
 5. 仓库只有 `platform/host/` 与 `platform/stm32/`；ARM Linux 适配层尚不存在，不能把“可以新增”写成“已经支持”。
 
@@ -26,7 +26,7 @@
 - `nav_sim`：动力学、传感器、场景和故障注入，只供主机使用；
 - `nav_stm32_port`：`platform/stm32/nav_tasks.c` 装配骨架；
 - `mission_sim`、`swarm_sim`、`nav_replay`、`nav_telemetry_dump`、`fcu_bridge_sim`：主机程序；
-- 测试目标：当前 CTest 清单 82 项。
+- 测试目标：当前 CTest 清单 83 项。
 
 主机专用的 `stdio`、文件读写和命令行只出现在 `platform/host/` 与测试。`simulation/` 不应进入真实平台。`platform/stm32/nav_platform.h` 只声明板级函数，没有包含 STM32 HAL；因此它能在主机用桩编译，但其命名和函数集合仍是 STM32 候选装配，不是通用 Linux 接口。
 
@@ -49,7 +49,7 @@ simulation/*
 `platform/stm32/nav_tasks.c::nav_app_step()` 当前执行：
 
 ```text
-nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
+nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
   + nav_camera_target_read + nav_camera_home_read + 其他输入
   → NavRuntimeInput
   → nav_runtime_step()
@@ -61,7 +61,7 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 
 这是一个固定内存、非阻塞意图明确的骨架，但存在两个关键事实：
 
-- 它直接从多个板级读取函数拼装状态，没有调用 `FcuBridge`；
+- 它按 `flight_state_source` 只读取内部 Flow 路径或外部 `FlightState` 路径；真实 `FcuBridge`/MAVLink 接收任务仍未实现；
 - `nav_fcu_set_armed()` 的名称混合了“导航请求”和“飞控真实 armed 状态”，后续协议冻结时必须澄清，不应让导航覆盖飞控最终权限。
 
 ### 3.3 核心输入处理
@@ -69,7 +69,7 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 `core/runtime/nav_runtime.h::NavRuntimeInput` 当前包含：
 
 - 必需 `ImuSample`；
-- 可选 `FlowFrame` 或 `OdomSample`；
+- 按静态模式互斥使用的外部 `FlightState`，或原有 `FlowFrame` / `OdomSample`；
 - ToF 高度；
 - `PixelObs` 目标和基座像素观测；
 - 障碍、邻机、任务/返航/紧急命令和停靠状态。
@@ -77,13 +77,13 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 `core/runtime/nav_runtime.c::nav_runtime_step()` 会：
 
 1. 检查输入年龄、重复、倒序和非有限值；
-2. 在光流存在时运行 `vf_update()`，否则使用 `OdomSample`；
-3. 调用 `estimator_update()` 形成 `NavState`；
+2. 内部模式在光流存在时运行 `vf_update()`，否则使用 `OdomSample`，再调用 `estimator_update()`；
+3. 外部模式验证 `FlightState` 后直接形成 `NavState`，跳过 `estimator_update()`；原始 IMU 仅继续服务碰撞检测等独立安全逻辑；
 4. 将 `PixelObs` 通过 `camera_reconstruct_nav()` 转成 `TargetObs`；
 5. 调用 `target_tracker_update()`、任务、安全、规划、制导和位置控制；
 6. 输出 `GuidanceOutput` 与 `CtrlOutput`。
 
-这说明当前外部三维目标状态并未直接进入主链，外部融合飞行状态也没有直接替代核心估计器的入口。
+外部融合飞行状态已能直接替代核心估计器输出；外部三维目标状态仍未直接进入主链。
 
 ## 4. 当前类型复用评估
 
@@ -91,12 +91,12 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 
 相关现有类型：
 
-- `flight/flight_state/flight_state.h::FlightState` 只有模式、armed 和电压，且当前没有其他 C 源码引用；不足以承担统一飞行状态。
+- `flight/flight_state/flight_state.h::FlightState` 是跨平台的最小融合状态输入，包含位置、速度、body-to-nav WXYZ 四元数、采样时间、字段有效位、坐标系和整体定位有效标志。
 - `core/state_estimator/state_estimator.h::NavState` 已包含位置、速度、姿态、角速度、线加速度、yaw、yaw rate、时间戳、有效性、质量、估计模式和健康状态；适合作为核心内部权威状态。
 - `flight/fcu_bridge/fcu_bridge.h::FcuStateSnapshot` 包含有效位、能力、姿态、角速度、加速度、本地位置/速度、高度、电量和飞控状态；适合作为外部飞控状态包的基础。
 - `OdomSample` 只包含位姿、速度、有效标志和时间戳，适合估计器观测，不足以单独表达完整 FlightState 和来源质量。
 
-结论：不要再新建一套与 `NavState` / `FcuStateSnapshot` 高度重复的结构。`FlightState` 应先作为接口语义名称：外部适配器基于 `FcuStateSnapshot` 或外部 VIO数据归一化，唯一状态提供者再映射为现有核心输入/状态。若后续确实需要新 ABI，应从现有字段演进并删除或弃用当前未使用的简化 `FlightState`，避免三个并行权威结构。
+结论：`FlightState` 只保留导航实际需要的融合位姿和有效性，不复制电量、armed、协方差或飞控能力。`FcuStateSnapshot` 可由 `fcu_state_to_flight_state()` 归一化；`NavState` 仍是核心内部状态。原始测量、外部融合状态和核心状态三层语义不得混用。
 
 ### 4.2 TargetObservation
 
@@ -120,28 +120,36 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 
 结论：`FcuSetpoint` 已经满足大部分 `FlightCommand` 要求，应作为统一外部指令的基础，不需要再复制一个命令结构。需要冻结的是：`motion_enabled` 的授权语义、唯一命令所有者、飞控能力选择、过期动作、模式反馈和导航请求与飞控实际 armed 状态的区别。
 
-## 5. 三类接口的 Draft 契约
+## 5. 三类接口契约
 
-以下为设计建议，不是本轮新增结构体或跨组已确认协议。
+FlightState 为第一阶段已实现基线；TargetObservation 与 FlightCommand 仍是后续设计建议。
+
+| 项目 | 当前状态 |
+|---|---|
+| FlightState 契约、来源互斥、失效与恢复 | `已实现并验证（主机）` |
+| `nav_flight_state_read()` 板级入口 | `已实现并由主机桩验证` |
+| 真实 FCU/VIO 状态适配器 | `等待硬件与定位选型` |
+| 自动定位源切换 | `设计预留，未实现` |
+| TargetObservation 直通 | `设计预留，未实现` |
+| FlightCommand/真实飞控 Failsafe | `设计预留 / 等待飞控选型` |
 
 ### 5.1 FlightState 语义
 
-最小字段：
+状态：`Frozen / Sim-verified（仅软件契约）`。
 
-| 字段 | 要求 | 可复用来源 |
-|---|---|---|
-| `source_id` | 飞控融合、外部 VIO、内部估计等枚举；任一时刻仅一个 active | 新增元数据 |
-| `frame_id` | 明确导航局部系或机体系，禁止靠注释猜测 | 新增元数据 |
-| `sample_timestamp` | 传感/估计采样时间 | `source_timestamp_ms` / `timestamp_ms` |
-| `received_timestamp` | 本机接收时间，用于链路年龄 | `FcuBridge.received_at_ms` |
-| 位置/速度/姿态 | SI 单位、四元数顺序明确 | `NavState` / `FcuStateSnapshot` |
-| 角速度/线加速度 | 明确机体系与比力/线加速度语义 | 现有字段 |
-| `valid_mask` | 每个字段独立有效 | `FcuStateSnapshot.valid_mask` |
-| `quality` / health | 可比较但不假设所有来源同一算法 | `NavState.quality/status` + 适配映射 |
+| 字段 | 已实现语义 |
+|---|---|
+| `position_m` | 局部导航系位置，m |
+| `velocity_mps` | 同一局部导航系线速度，m/s |
+| `attitude_body_to_nav` | 机体系到导航系，WXYZ 四元数；有限且范数在允许区间 |
+| `timestamp_ms` | 映射到导航本地单调毫秒时钟的采样时间 |
+| `valid_mask` | 位置、速度、姿态三项均为必需字段 |
+| `frame` | 当前只接受右手局部 X/Y、正 Z 向上；原点与航向在一次运行中保持稳定 |
+| `valid` | 定位模块对整份融合状态的有效判定；为 0 时不得沿用旧状态继续运动 |
 
-所有权：平台状态适配器拥有协议解析和坐标/时间转换；`FlightStateProvider` 拥有唯一来源选择；`NavRuntime` 只消费一个已选状态或其现有采样形式。
+`NavRuntimeConfig.flight_state_source` 只允许 `INTERNAL_ESTIMATOR` 或 `EXTERNAL`。内部模式保留原 IMU + Flow/Odom + ToF 估计链；外部模式要求 `FlightState`，拒绝同时提供 Flow/Odom，并直接写入核心 `NavState`。原始 IMU 仍为必需输入，但只用于碰撞检测等独立逻辑，不参与外部状态的二次融合。
 
-切换规则：备用来源不能静默覆盖主来源。切换必须经过显式状态机，至少记录旧/新来源、原因、时间、位置/速度跳变和是否需要保持/中止。硬件未定前不冻结自动切换阈值。
+本轮未加入协方差、质量分数和逐包 `source_id`：现有导航计算不消费协方差；不同定位器的质量不可直接比较；活动来源由启动配置唯一确定。链路接收时间属于未来真实适配器/FcuBridge，不塞入融合状态样本。自动来源切换未设计，也未实现。
 
 ### 5.2 TargetObservation 语义
 
@@ -176,11 +184,11 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 | 序号/来源 | 支持重复、乱序、重启与诊断 |
 | 失效动作 | 由飞控/平台适配器实现，导航只发禁用或停止授权 |
 
-所有权：`NavRuntime` 是任务级运动意图的唯一生产者；命令适配器只做能力选择、坐标/单位/协议转换和更严格的禁用；飞控拥有最终低层控制、解锁、限幅和失联动作。规则中安全员人工停桨由安全员和飞控链路负责，不属于本导航软件实现；本软件只需在接到外部中止状态后停止输出有效运动授权。
+所有权：`NavRuntime` 是任务级运动意图的唯一生产者；命令适配器只做能力选择、坐标/单位/协议转换和更严格的禁用；飞控拥有最终低层控制、解锁、限幅和失联动作。安全员人工停桨由安全员和独立飞控链路负责，不属于本导航软件实现；导航仍负责状态有效性、围栏/输出约束和故障后的停止授权。具体飞控失联、悬停、降落或停桨动作在实测前均为待确认。
 
 ## 6. 坐标、时间和单位建议
 
-状态：`Draft / 待视觉组与飞控组确认`。
+状态：FlightState 内部契约为 `Frozen`；外部视觉与具体飞控坐标映射仍为 `Draft / 待确认`。
 
 - 内部导航局部系建议使用右手 z-up，SI 单位；初始化 +X 的任务含义需由场地/任务配置给出。
 - 机体系建议右手 FLU（+X 前、+Y 左、+Z 上）；若飞控使用 NED/FRD，只能在飞控适配器中转换。
@@ -189,7 +197,7 @@ nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
 - 核心继续使用单调 `uint32_t` 毫秒并验证回绕；适配器保留采样时间与接收时间，必要时做时钟偏移估计。
 - 外参由目标适配层单点拥有。视觉组若输出相机系三维位置，导航适配器转换一次；视觉组若已输出约定导航系，不再二次变换。
 
-现有 `FcuStateSnapshot` 注释只冻结了“local X/Y、正 Z 向上”，尚未完整定义 X/Y 朝向、body 轴和四元数方向，因此当前不能声称坐标契约已 Frozen。
+`FlightState` 已冻结 body-to-nav 四元数方向与 WXYZ 顺序；具体适配器仍必须确认外部 X/Y 朝向、body 轴和原点，再转换到该内部契约。`FcuStateSnapshot` 或 MAVLink 数据未经这一步不得直接输入运行时。
 
 ## 7. 数据与控制所有权
 
@@ -243,7 +251,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 不需要整体迁移 C++。保留 C99 核心的理由：
 
-- 现有算法和 82 项测试都围绕该 ABI；
+- 现有算法和 83 项测试都围绕该 ABI；
 - 固定内存和有界行为适合 MCU，也能作为 Linux 上的稳定库；
 - 当前缺口是接口和数据所有权，不是语言表达能力；
 - 整体迁移会制造大范围差异，却不解决硬件、坐标、时间和协议不确定性。
@@ -261,11 +269,11 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 保留现有主机仿真，并增加以下最小测试设计：
 
-1. 同一 FlightState 规范向量分别经过 host、STM32 桩和未来 Linux 适配器，比较核心可见字段。
+1. FlightState 规范向量已经过 `NavRuntime` 与 STM32 `NavApp` 主机桩；未来 Linux 适配器必须复用同一向量。
 2. 覆盖 NED/FRD 到内部 z-up/FLU 的静止、倾斜、平移和 yaw 测试向量。
 3. 覆盖采样时间、接收时间、32 位回绕、过期、重复、倒序和来源重启。
 4. 同一目标分别以 pixel 兼容路径和已知三维路径输入，验证不会重复重建；视觉组实际三维样本走回放测试。
-5. 检查同一周期两种主状态或两种目标输入同时出现时被明确拒绝/选择。
+5. 同一周期两种主状态的拒绝已覆盖；两种目标输入互斥留待 TargetObservation 阶段。
 6. 检查 `FcuSetpoint` 的速度/yaw、有效期、`motion_enabled`、序号和禁用包在不同适配器编码后语义一致。
 7. 飞控状态过期、命令队列拒绝、外部中止输入和进程/链路重启后，导航不继续授权旧运动命令。
 
@@ -283,11 +291,11 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 ### 3. 定位状态如何进入主链，缺口是什么？
 
-当前 `NavRuntimeInput` 通过必需 IMU、可选 Flow/Odom 和 ToF 进入 `estimator_update()`，形成 `NavState`。`FcuStateSnapshot` 可以由 `fcu_state_to_nav_samples()` 转成 IMU/Odom/height，但该路径未接入 `NavApp`。外部已融合 FlightState 没有包含来源/坐标/质量和唯一仲裁的正式入口，这是主要缺口。
+默认模式仍由必需 IMU、可选 Flow/Odom 和 ToF 进入 `estimator_update()`。外部模式由 `NavApp.nav_flight_state_read()` 填充 `NavRuntimeInput.flight_state`，经时间、数值、frame、四元数和有效位检查后直接形成 `NavState`，不调用估计器积分。缺口是尚无真实设备适配、时钟同步和硬件验证。
 
 ### 4. 如何支持不同定位来源？
 
-在平台边界建立唯一 `FlightStateProvider`，候选适配器先归一化，再显式选择一个 active 来源。优先复用 `FcuStateSnapshot`、`NavState` 和 `OdomSample`；只有现有字段确实不足时才演进类型。来源切换必须可观测、可拒绝，并能触发保持/中止。
+候选适配器先归一化为 `FlightState`，再用 `flight_state_source` 在启动时选择内部估计或外部融合状态。当前不自动切换；若以后需要备用源，必须另行设计可观测切换状态机，不能在本接口上静默覆盖。
 
 ### 5. 如何接收视觉目标而不重复三维重建？
 
@@ -311,7 +319,7 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 
 ### 10. 当前结构性迁移阻碍是什么？
 
-依严重性排序：目标只有像素正式入口；主状态没有唯一来源仲裁；FcuBridge 未进入 NavApp 主链；命令能力/授权未与真实飞控状态闭合；坐标与四元数契约不完整；Linux 适配不存在；`FlightState` 简化类型未使用且容易形成重复概念；时间同步与来源切换尚无接口测试。
+依严重性排序：目标只有像素正式入口；真实 FlightState 适配器尚不存在；命令能力/授权未与真实飞控状态闭合；外部设备时钟同步未实现；Linux 适配不存在；自动来源切换尚未设计。FlightState 的最小坐标、四元数、静态所有权和失效测试已完成。
 
 ## 12. 改造分类
 
@@ -326,11 +334,10 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 ### 建议最小修改
 
 - 让规范化 `TargetObs` 正式进入 `NavRuntimeInput`，并与 `PixelObs` 互斥；
-- 建立唯一 FlightState 来源/选择器并把 FcuBridge 接入平台装配；
+- 硬件选型后把一个 FcuBridge/VIO 适配器接到已存在的 `nav_flight_state_read()`；
 - 澄清/替换 `nav_fcu_set_armed` 的请求语义，避免冒充飞控真实状态；
 - 让命令生成使用飞控能力与活动状态；
-- 补充 frame、来源、有效位、采样/接收时间和接口一致性测试；
-- 将未使用的简化 `FlightState` 合并、弃用或明确仅代表飞控模式，避免重名。
+- 为真实适配器补充外部 frame 转换、采样/接收时间和接口一致性测试；
 
 ### 硬件确定后才能开发
 
@@ -345,11 +352,11 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 - 飞控状态/能力/控制模式和实际 armed 反馈；
 - 上层计算平台与定位来源；
 - 规则待定冲击参数和机体接触能力；
-- 安全员人工停桨链路只需向导航提供何种中止状态。
+- 安全员人工停桨链路向导航提供何种中止状态与确认反馈；这不替代导航自身的有效性和边界检查。
 
 ## 13. 验证边界
 
-当前 82 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、失效处理和组合逻辑。它们不能证明：
+当前 83 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、FlightState 直通/失效处理和组合逻辑。它们不能证明：
 
 - STM32 或 ARM Linux 的资源和实时性；
 - 任一真实 VIO、视觉模块或飞控兼容；
@@ -357,4 +364,4 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 - 真实机体接近/撞击稳定；
 - 软件已经满足比赛部署条件。
 
-规则中由安全员人工执行的停桨、飞出战场和飞行不稳定处置不纳入导航软件功能验收。导航软件只验收自身状态/目标/命令契约、失效后的停止授权，以及外部中止输入的响应。
+安全员人工执行停桨、飞出战场和飞行不稳定后的最终处置，独立于导航软件。导航软件仍验收状态/目标/命令契约、围栏和输出约束、失效后的停止授权及外部中止响应；当前主机证据不证明真实飞控具备悬停、降落或停桨 Failsafe。

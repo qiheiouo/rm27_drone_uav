@@ -1,32 +1,48 @@
-/*
- * flight_state.h - 飞控分层接口的状态定义
- *
- * Plan 第 9 节：飞控和导航必须分层。导航层只输出
- * position/velocity/yaw 目标，绝不直接控制电机。
- * 姿态/角速度环与电机混控属于低层飞控（最高优先级），
- * 即使视觉/规划/定位全部失效也必须保持姿态稳定。
- */
+/* Platform-neutral fused flight-state input contract. */
 #ifndef FLIGHT_STATE_H
 #define FLIGHT_STATE_H
 
 #include <stdint.h>
 
+#include "nav_math.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/*
+ * All producers must convert into this frame before publishing a sample.
+ * It is right-handed, uses metres/seconds, has positive Z upward, and keeps
+ * one stable local X/Y origin and heading for the complete navigation run.
+ */
 typedef enum {
-    FC_DISARMED = 0,
-    FC_ARMED_IDLE,       /* 解锁但未起飞 */
-    FC_POSITION_MODE,    /* 接受导航层位置/速度目标 */
-    FC_STABILIZE_MODE,   /* 仅姿态稳定（导航失效时的保底） */
-    FC_EMERGENCY         /* 紧急（直接降落/断油由低层裁决） */
-} FlightControllerMode;
+    FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP = 0
+} FlightStateFrame;
 
+enum {
+    FLIGHT_STATE_VALID_POSITION = 1u << 0,
+    FLIGHT_STATE_VALID_VELOCITY = 1u << 1,
+    FLIGHT_STATE_VALID_ATTITUDE = 1u << 2
+};
+
+#define FLIGHT_STATE_REQUIRED_MASK ((uint32_t)( \
+    FLIGHT_STATE_VALID_POSITION | FLIGHT_STATE_VALID_VELOCITY | \
+    FLIGHT_STATE_VALID_ATTITUDE))
+
+/*
+ * Fused state, not a raw sensor measurement. attitude_body_to_nav is a WXYZ
+ * quaternion rotating body-frame vectors into the navigation frame.
+ * timestamp_ms is the sample time on NavRuntime's monotonic millisecond clock.
+ * valid == 0 reports localization loss even if the last fields are present.
+ */
 typedef struct {
-    FlightControllerMode mode;
-    uint8_t  armed;
-    float    battery_v;
+    Vec3f position_m;
+    Vec3f velocity_mps;
+    Quatf attitude_body_to_nav;
+    uint32_t timestamp_ms;
+    uint32_t valid_mask;
+    FlightStateFrame frame;
+    uint8_t valid;
 } FlightState;
 
 #ifdef __cplusplus

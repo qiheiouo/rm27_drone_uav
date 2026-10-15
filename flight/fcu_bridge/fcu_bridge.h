@@ -7,6 +7,7 @@
 #include "nav_math.h"
 #include "state_estimator.h"
 #include "pos_controller.h"
+#include "flight_state.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -199,7 +200,12 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
                                  uint32_t now_ms,
                                  FcuSetpoint *setpoint);
 
-/* Convert a normalized FCU snapshot into inputs consumed by NavRuntime. */
+/* Convert a normalized fused FCU estimate into the authoritative contract. */
+uint8_t fcu_state_to_flight_state(const FcuStateSnapshot *state,
+                                  uint32_t local_timestamp_ms,
+                                  FlightState *flight_state);
+
+/* Legacy split adapter retained for existing bridge tests and experiments. */
 uint8_t fcu_state_to_nav_samples(const FcuStateSnapshot *state,
                                  uint32_t local_timestamp_ms,
                                  ImuSample *imu,

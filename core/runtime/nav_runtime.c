@@ -69,6 +69,28 @@ static uint8_t quaternion_finite(Quatf attitude)
             nav_isfinite(attitude.y) && nav_isfinite(attitude.z)) ? 1u : 0u;
 }
 
+static float quaternion_norm_squared(Quatf attitude)
+{
+    return attitude.w * attitude.w + attitude.x * attitude.x +
+        attitude.y * attitude.y + attitude.z * attitude.z;
+}
+
+static uint8_t flight_state_finite(const FlightState *state)
+{
+    return (vec3_is_finite(state->position_m) &&
+            vec3_is_finite(state->velocity_mps) &&
+            quaternion_finite(state->attitude_body_to_nav)) ? 1u : 0u;
+}
+
+static uint8_t flight_state_contract_valid(const FlightState *state)
+{
+    float norm_squared = quaternion_norm_squared(state->attitude_body_to_nav);
+    return (state->valid == 1u &&
+            state->frame == FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP &&
+            state->valid_mask == FLIGHT_STATE_REQUIRED_MASK &&
+            norm_squared >= 0.81f && norm_squared <= 1.21f) ? 1u : 0u;
+}
+
 static uint8_t flow_frame_finite(const FlowFrame *frame)
 {
     uint8_t index;
@@ -105,6 +127,7 @@ static uint8_t source_index(uint32_t source_mask)
     case NAV_INPUT_SOURCE_ODOMETRY: return 2u;
     case NAV_INPUT_SOURCE_TARGET: return 3u;
     case NAV_INPUT_SOURCE_HOME: return 4u;
+    case NAV_INPUT_SOURCE_FLIGHT_STATE: return 5u;
     default: return 0u;
     }
 }
@@ -186,6 +209,54 @@ static void mark_invalid(NavRuntime *runtime, uint32_t now_ms,
     health->invalid_source_mask |= source_mask;
     log_input_fault(runtime, now_ms, NAV_LOG_INPUT_INVALID,
                     source_mask, 0u, event_flags);
+}
+
+static uint8_t reject_runtime_input(NavRuntime *runtime,
+                                    const NavRuntimeHealth *health,
+                                    uint32_t event_flags)
+{
+    runtime->output.nav = runtime->estimator.out;
+    runtime->output.health = *health;
+    runtime->output.event_flags = event_flags;
+    runtime->output.armed = 0u;
+    runtime->output.step_valid = 0u;
+    runtime->output.control.accel_cmd = vec3_zero();
+    runtime->output.control.yaw_rate_cmd = 0.0f;
+    return 0u;
+}
+
+static void invalidate_external_flight_state(NavRuntime *runtime,
+                                             uint32_t timestamp_ms)
+{
+    runtime->estimator.out.vel = vec3_zero();
+    runtime->estimator.out.timestamp_ms = timestamp_ms;
+    runtime->estimator.out.validity = NAV_VALID_INVALID;
+    runtime->estimator.out.quality = 0.0f;
+    runtime->estimator.out.mode = EST_MODE_EXTERNAL;
+    runtime->estimator.out.status = EST_LOST;
+}
+
+static void apply_external_flight_state(NavRuntime *runtime,
+                                        const FlightState *state,
+                                        const ImuSample *imu)
+{
+    NavState *nav = &runtime->estimator.out;
+    nav->pos = state->position_m;
+    nav->vel = state->velocity_mps;
+    nav->att = quat_normalize(state->attitude_body_to_nav);
+    nav->angular_velocity = imu->gyro;
+    nav->linear_acceleration = vec3_zero();
+    nav->yaw = quat_to_yaw(nav->att);
+    nav->yaw_rate = imu->gyro.z;
+    nav->timestamp_ms = state->timestamp_ms;
+    nav->validity = NAV_VALID_VALID;
+    nav->quality = 1.0f;
+    nav->mode = EST_MODE_EXTERNAL;
+    nav->status = EST_TRACKING;
+    runtime->estimator.ins_pos = nav->pos;
+    runtime->estimator.ins_vel = nav->vel;
+    runtime->estimator.ins_att = nav->att;
+    runtime->estimator.last_valid = *nav;
 }
 
 static void watchdog_update(NavRuntime *runtime, uint32_t now_ms,
@@ -320,6 +391,7 @@ void nav_runtime_config_default(NavRuntimeConfig *cfg)
     cfg->mission.docked_launch_delay_s = 0.5f;
 
     cfg->estimator.mode = EST_MODE_INS;
+    cfg->flight_state_source = NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR;
     cfg->estimator.vo_degraded_after_s = 0.6f;
     cfg->estimator.vo_lost_after_s = 2.0f;
     cfg->estimator.recovering_hold_s = 0.5f;
@@ -413,6 +485,7 @@ void nav_runtime_config_default(NavRuntimeConfig *cfg)
     cfg->health.imu_max_age_ms = 30u;
     cfg->health.flow_max_age_ms = 150u;
     cfg->health.odometry_max_age_ms = 150u;
+    cfg->health.flight_state_max_age_ms = 150u;
     cfg->health.vision_max_age_ms = 250u;
     cfg->health.future_tolerance_ms = 5u;
     cfg->health.max_cycle_gap_ms = 50u;
@@ -438,12 +511,17 @@ uint32_t nav_runtime_config_validate(const NavRuntimeConfig *cfg)
         cfg->health.imu_max_age_ms == 0u ||
         cfg->health.flow_max_age_ms == 0u ||
         cfg->health.odometry_max_age_ms == 0u ||
+        cfg->health.flight_state_max_age_ms == 0u ||
         cfg->health.vision_max_age_ms == 0u ||
         cfg->health.max_cycle_gap_ms == 0u ||
         (float)cfg->health.max_cycle_gap_ms < 1000.0f * cfg->nominal_dt_s ||
         cfg->health.future_tolerance_ms > cfg->health.max_cycle_gap_ms ||
         cfg->health.watchdog_trip_after_overruns == 0u) {
         errors |= NAV_CONFIG_ERROR_TIMING;
+    }
+    if (cfg->flight_state_source != NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR &&
+        cfg->flight_state_source != NAV_FLIGHT_STATE_EXTERNAL) {
+        errors |= NAV_CONFIG_ERROR_STATE_SOURCE;
     }
     if (!positive_finite(mission->takeoff_alt_m) ||
         !positive_finite(mission->waypoint_tol_m) ||
@@ -588,6 +666,7 @@ const char *nav_runtime_config_error_name(uint32_t single_error)
     case NAV_CONFIG_ERROR_CAMERA: return "camera";
     case NAV_CONFIG_ERROR_ROUTE: return "route";
     case NAV_CONFIG_ERROR_SWARM: return "swarm";
+    case NAV_CONFIG_ERROR_STATE_SOURCE: return "state-source";
     default: return "multiple-or-unknown";
     }
 }
@@ -634,6 +713,7 @@ uint32_t nav_runtime_init(NavRuntime *runtime, const NavRuntimeConfig *cfg)
     runtime->mission_output.guidance = GM_NONE;
     runtime->output.trajectory = runtime->trajectory_report;
     runtime->output.trajectory_valid = 1u;
+    runtime->output.flight_state_source = cfg->flight_state_source;
     runtime->initialized = 1u;
     return NAV_CONFIG_ERROR_NONE;
 }
@@ -713,16 +793,63 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
         health.required_input_valid = imu_valid;
     }
     if (!health.required_input_valid) {
-        runtime->output.health = health;
-        runtime->output.event_flags = event_flags;
-        runtime->output.armed = 0u;
-        runtime->output.step_valid = 0u;
-        runtime->output.control.accel_cmd = vec3_zero();
-        runtime->output.control.yaw_rate_cmd = 0.0f;
-        return 0u;
+        return reject_runtime_input(runtime, &health, event_flags);
     }
 
-    if (input->flow != 0 &&
+    if (cfg->flight_state_source == NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR) {
+        if (input->flight_state != 0) {
+            mark_invalid(runtime, time_ms, NAV_INPUT_SOURCE_FLIGHT_STATE,
+                         &health, &event_flags);
+            health.required_input_valid = 0u;
+            return reject_runtime_input(runtime, &health, event_flags);
+        }
+    } else {
+        uint8_t state_valid = 1u;
+        if (input->flow != 0) {
+            mark_invalid(runtime, time_ms, NAV_INPUT_SOURCE_FLOW,
+                         &health, &event_flags);
+            state_valid = 0u;
+        }
+        if (input->odometry != 0) {
+            mark_invalid(runtime, time_ms, NAV_INPUT_SOURCE_ODOMETRY,
+                         &health, &event_flags);
+            state_valid = 0u;
+        }
+        if (input->flight_state == 0) {
+            health.stale_source_mask |= NAV_INPUT_SOURCE_FLIGHT_STATE;
+            log_input_fault(runtime, time_ms, NAV_LOG_INPUT_STALE,
+                            NAV_INPUT_SOURCE_FLIGHT_STATE, 0u, &event_flags);
+            state_valid = 0u;
+        } else {
+            if (!source_timestamp_valid(runtime,
+                    NAV_INPUT_SOURCE_FLIGHT_STATE,
+                    input->flight_state->timestamp_ms, time_ms,
+                    cfg->health.flight_state_max_age_ms,
+                    &health, &event_flags)) {
+                state_valid = 0u;
+            }
+            if (!flight_state_finite(input->flight_state)) {
+                mark_nonfinite(runtime, time_ms,
+                               NAV_INPUT_SOURCE_FLIGHT_STATE,
+                               &health, &event_flags);
+                state_valid = 0u;
+            } else if (!flight_state_contract_valid(input->flight_state)) {
+                mark_invalid(runtime, time_ms,
+                             NAV_INPUT_SOURCE_FLIGHT_STATE,
+                             &health, &event_flags);
+                state_valid = 0u;
+            }
+        }
+        if (!state_valid) {
+            health.required_input_valid = 0u;
+            invalidate_external_flight_state(runtime, time_ms);
+            return reject_runtime_input(runtime, &health, event_flags);
+        }
+        apply_external_flight_state(runtime, input->flight_state, input->imu);
+    }
+
+    if (cfg->flight_state_source == NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR &&
+        input->flow != 0 &&
         source_timestamp_valid(runtime, NAV_INPUT_SOURCE_FLOW,
             input->flow->timestamp_ms, time_ms, cfg->health.flow_max_age_ms,
             &health, &event_flags)) {
@@ -733,7 +860,8 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
                            &health, &event_flags);
         }
     }
-    if (input->odometry != 0 &&
+    if (cfg->flight_state_source == NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR &&
+        input->odometry != 0 &&
         source_timestamp_valid(runtime, NAV_INPUT_SOURCE_ODOMETRY,
             input->odometry->timestamp_ms, time_ms,
             cfg->health.odometry_max_age_ms, &health, &event_flags)) {
@@ -774,14 +902,25 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     odometry.att = runtime->estimator.out.att;
     odometry.valid = 0u;
     odometry.timestamp_ms = time_ms;
-    if (flow_sample != 0) {
-        vf_update(&runtime->vision_frontend, flow_sample, input->imu->gyro,
-                  runtime->estimator.out.att, input->tof_height, dt, &odometry);
-    } else if (odometry_sample != 0) {
-        odometry = *odometry_sample;
+    if (cfg->flight_state_source == NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR) {
+        if (flow_sample != 0) {
+            vf_update(&runtime->vision_frontend, flow_sample, input->imu->gyro,
+                      runtime->estimator.out.att, input->tof_height, dt,
+                      &odometry);
+        } else if (odometry_sample != 0) {
+            odometry = *odometry_sample;
+        }
+        estimator_update(&runtime->estimator, input->imu, &odometry,
+                         input->tof_height, dt);
+    } else {
+        odometry.pos = runtime->estimator.out.pos;
+        odometry.vel = runtime->estimator.out.vel;
+        odometry.yaw = runtime->estimator.out.yaw;
+        odometry.yaw_rate = runtime->estimator.out.yaw_rate;
+        odometry.att = runtime->estimator.out.att;
+        odometry.valid = 1u;
+        odometry.timestamp_ms = runtime->estimator.out.timestamp_ms;
     }
-    estimator_update(&runtime->estimator, input->imu, &odometry,
-                     input->tof_height, dt);
 
     impact_detector_arm(&runtime->impact_detector,
         (runtime->mission.state == MS_TARGET_TRACK ||
@@ -828,7 +967,8 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     target_tracker_update(&runtime->target_tracker, &target_observation, dt);
     home_detector_update(&runtime->home_detector, &home_observation, dt);
 
-    if (home_observation.visible &&
+    if (cfg->flight_state_source == NAV_FLIGHT_STATE_INTERNAL_ESTIMATOR &&
+        home_observation.visible &&
         (!runtime->relocalization_seen ||
          (uint32_t)(time_ms - runtime->last_relocalization_ms) >=
         (uint32_t)(1000.0f * cfg->relocalization_cooldown_s))) {
@@ -1154,6 +1294,7 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     runtime->output.swarm_self = runtime->swarm.self;
     runtime->output.health = health;
     runtime->output.event_flags = event_flags;
+    runtime->output.flight_state_source = cfg->flight_state_source;
     runtime->output.recovery_active = runtime->recovery.active;
     runtime->output.trajectory_active = runtime->trajectory_active;
     runtime->output.trajectory_valid = runtime->trajectory_valid;

@@ -211,6 +211,7 @@ static int replay_once(const char *path, uint8_t emit, ReplayResult *result)
 
         input.timestamp_ms = sample.timestamp_ms;
         input.imu = &sample.imu;
+        input.flight_state = 0;
         input.flow = 0;
         input.odometry = &sample.odometry;
         input.tof_height = sample.tof_height;

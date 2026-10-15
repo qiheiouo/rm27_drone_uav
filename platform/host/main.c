@@ -380,6 +380,7 @@ int main(int argc, char **argv)
 
         input.timestamp_ms = time_ms;
         input.imu = &imu;
+        input.flight_state = 0;
         input.flow = scenario.use_flow_vo ? &flow_frame : 0;
         input.odometry = scenario.use_flow_vo ? 0 : &odometry;
         input.tof_height = tof_height;

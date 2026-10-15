@@ -144,6 +144,10 @@ add_executable(test_nav_app_fcu tests/test_nav_app_fcu.c)
 target_link_libraries(test_nav_app_fcu PRIVATE nav_stm32_port nav_core)
 add_test(NAME test_nav_app_fcu COMMAND test_nav_app_fcu)
 
+add_executable(test_nav_app_flight_state tests/test_nav_app_flight_state.c)
+target_link_libraries(test_nav_app_flight_state PRIVATE nav_stm32_port nav_core)
+add_test(NAME test_nav_app_flight_state COMMAND test_nav_app_flight_state)
+
 foreach(scenario
     nominal
     lossy

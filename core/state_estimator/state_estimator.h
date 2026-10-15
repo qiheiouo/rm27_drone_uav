@@ -23,7 +23,9 @@ typedef enum {
 
 typedef enum {
     EST_MODE_TRUTH = 0,
-    EST_MODE_INS
+    EST_MODE_INS,
+    /* Published by NavRuntime when an external FlightState bypasses fusion. */
+    EST_MODE_EXTERNAL
 } EstimatorMode;
 
 typedef enum {

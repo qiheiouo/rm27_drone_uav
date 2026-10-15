@@ -13,6 +13,7 @@ static NavRuntimeInput make_input(ImuSample *imu, uint32_t timestamp_ms,
     NavRuntimeInput input;
     input.timestamp_ms = timestamp_ms;
     input.imu = imu;
+    input.flight_state = 0;
     input.flow = 0;
     input.odometry = 0;
     input.tof_height = -1.0f;

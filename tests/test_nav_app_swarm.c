@@ -47,6 +47,8 @@ int nav_imu_read(ImuSample *out)
     return 0;
 }
 
+int nav_flight_state_read(FlightState *out) { (void)out; return -1; }
+
 int nav_tof_read(float *height_m)
 {
     *height_m = 0.0f;

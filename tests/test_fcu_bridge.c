@@ -57,6 +57,7 @@ int main(void)
     FcuStateSnapshot decoded_state;
     FcuSetpoint setpoint;
     FcuSetpoint decoded_setpoint;
+    FlightState flight_state;
     GuidanceOutput guidance;
     CtrlOutput control;
     ImuSample imu;
@@ -152,6 +153,12 @@ int main(void)
     CHECK(odometry.valid == 1u);
     CHECK(nearf(odometry.pos.y, 2.0f));
     CHECK(nearf(height_m, 2.8f));
+    CHECK(fcu_state_to_flight_state(&state, 510u, &flight_state));
+    CHECK(flight_state.timestamp_ms == 510u);
+    CHECK(flight_state.valid_mask == FLIGHT_STATE_REQUIRED_MASK);
+    CHECK(flight_state.frame == FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP);
+    CHECK(flight_state.valid == 1u);
+    CHECK(nearf(flight_state.position_m.y, 2.0f));
 
     /* Auto mode falls back to acceleration when velocity is unsupported. */
     fcu_bridge_init(&bridge, &cfg);

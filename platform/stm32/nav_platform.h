@@ -16,6 +16,7 @@
 #include "collision_interface.h"
 #include "nav_telemetry.h"
 #include "fcu_bridge.h"
+#include "flight_state.h"
 #include "swarm_link.h"
 
 #ifdef __cplusplus
@@ -39,6 +40,8 @@ uint32_t nav_time_ms(void);
 
 /* Return 0 for a fresh valid sample, negative when unavailable. */
 int nav_imu_read(ImuSample *out);
+/* Read one already-normalized fused state; it is not a raw sensor sample. */
+int nav_flight_state_read(FlightState *out);
 int nav_tof_read(float *height_m);
 int nav_flow_read(FlowFrame *out);
 int nav_camera_target_read(PixelObs *out);

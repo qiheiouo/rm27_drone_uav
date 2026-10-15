@@ -433,6 +433,26 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
     return setpoint_is_valid(setpoint);
 }
 
+uint8_t fcu_state_to_flight_state(const FcuStateSnapshot *state,
+                                  uint32_t local_timestamp_ms,
+                                  FlightState *flight_state)
+{
+    uint32_t required = FCU_STATE_VALID_ATTITUDE |
+        FCU_STATE_VALID_LOCAL_POSITION | FCU_STATE_VALID_LOCAL_VELOCITY;
+    if (state == 0 || flight_state == 0 || !state_is_valid(state) ||
+        (state->valid_mask & required) != required) {
+        return 0u;
+    }
+    flight_state->position_m = state->local_position;
+    flight_state->velocity_mps = state->local_velocity;
+    flight_state->attitude_body_to_nav = quat_normalize(state->attitude);
+    flight_state->timestamp_ms = local_timestamp_ms;
+    flight_state->valid_mask = FLIGHT_STATE_REQUIRED_MASK;
+    flight_state->frame = FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP;
+    flight_state->valid = state->estimator_healthy;
+    return 1u;
+}
+
 uint8_t fcu_state_to_nav_samples(const FcuStateSnapshot *state,
                                  uint32_t local_timestamp_ms,
                                  ImuSample *imu,

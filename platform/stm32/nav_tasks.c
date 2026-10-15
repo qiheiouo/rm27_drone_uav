@@ -141,6 +141,7 @@ void nav_app_step(NavApp *app, float dt)
 {
     uint32_t time_ms;
     ImuSample imu;
+    FlightState flight_state;
     FlowFrame frame;
     PixelObs target_pixel;
     PixelObs home_pixel;
@@ -151,6 +152,7 @@ void nav_app_step(NavApp *app, float dt)
     NavRuntimeInput input;
     float tof_height = -1.0f;
     uint8_t flow_valid;
+    uint8_t flight_state_valid;
     uint8_t target_valid;
     uint8_t home_valid;
     uint8_t obstacles_valid;
@@ -164,7 +166,14 @@ void nav_app_step(NavApp *app, float dt)
     }
 
     (void)nav_tof_read(&tof_height);
-    flow_valid = (nav_flow_read(&frame) == 0) ? 1u : 0u;
+    flow_valid = 0u;
+    flight_state_valid = 0u;
+    if (app->runtime.cfg.flight_state_source == NAV_FLIGHT_STATE_EXTERNAL) {
+        flight_state_valid =
+            (nav_flight_state_read(&flight_state) == 0) ? 1u : 0u;
+    } else {
+        flow_valid = (nav_flow_read(&frame) == 0) ? 1u : 0u;
+    }
     target_valid = (nav_camera_target_read(&target_pixel) == 0) ? 1u : 0u;
     home_valid = (nav_camera_home_read(&home_pixel) == 0) ? 1u : 0u;
     obstacle_set_init(&obstacles);
@@ -182,6 +191,7 @@ void nav_app_step(NavApp *app, float dt)
 
     input.timestamp_ms = time_ms;
     input.imu = &imu;
+    input.flight_state = flight_state_valid ? &flight_state : 0;
     input.flow = flow_valid ? &frame : 0;
     input.odometry = 0;
     input.tof_height = tof_height;
