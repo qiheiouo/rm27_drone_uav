@@ -1,118 +1,360 @@
-# 架构说明
+# 软件架构与平台无关化设计评审
 
-## 1. 设计边界
+评审日期：2026-10-15
 
-本项目不是高算力无人机系统的缩小移植版，而是面向固定任务闭环、固定内存和有界运行时间的 MCU 方案。主机与 STM32 适配层调用同一个 `NavRuntime`；主机额外链接 `nav_sim`，固件不链接任何仿真代码。
+评审范围：当前 `main` 的 C99 源码、CMake 目标、主机仿真、STM32 候选适配、测试与相关技术文档。本轮只给出设计结论和最小改造清单，不修改算法实现、运行参数或通信驱动。
 
-`NavRuntime` 是平台无关的固定内存装配层，统一输入健康检查、估计、感知、撞击恢复、任务状态机、安全、规划、避障、蜂群冲突和位置控制的调用顺序。host 负责构造仿真传感器输入，STM32 适配层负责调用板级接口，二者不再各自维护一份算法主循环。连续周期超时由运行时 watchdog 锁存，诊断事件进入固定容量环形记录。
+## 1. 结论摘要
 
-系统遵循三条边界：
+现有 `nav_core` 已经具备较好的平台无关基础：C99、固定内存、有界循环、核心无 HAL/POSIX/线程/文件系统/ROS 2/具体飞控 SDK 依赖，主机与 STM32 骨架都调用 `NavRuntime`。不需要整体迁移 C++。
 
-1. 姿态/角速度环和电机混控独立于导航层；
-2. 算法不使用动态内存，循环次数由容量或配置上限约束；
-3. 每个高级能力都有退化路径：优化轨迹失败后时间拉伸、局部绕行或简单航点制导，视觉失效后短时惯性预测、返航或紧急降落；只有受控制器限幅保护的纯速度/加速度后检查失败可降级继续，非有限值、工作空间或碰撞错误会保持无效并进入安全计时。
+真正阻碍平台迁移的不是语言，而是接口尚未完全闭合：
 
-## 2. 数据流
+1. `NavRuntimeInput` 的目标入口只有 `PixelObs`，核心在 `nav_runtime_step()` 内按目标尺寸重建三维位置；外部视觉若已经提供三维位置，没有正式直通入口。
+2. `FcuStateSnapshot`、`FcuBridge` 和 `fcu_state_to_nav_samples()` 已存在，但 `platform/stm32/nav_tasks.c` 没有把它们接入 `NavApp` 主循环；文档描述的状态桥仍主要停留在契约和独立测试层。
+3. 现有 `NavState` 能表达核心飞行状态，但没有“唯一主状态来源、来源切换、坐标标识、采样时间与质量”的完整外部契约。
+4. `FcuSetpoint` 已很接近统一 `FlightCommand`，但 `NavApp` 直接以 `FCU_CONTROL_AUTO` 生成命令，尚未消费真实飞控能力、活动状态或控制授权反馈。
+5. 仓库只有 `platform/host/` 与 `platform/stm32/`；ARM Linux 适配层尚不存在，不能把“可以新增”写成“已经支持”。
 
-```text
-IMU ───────────────┐
-光流帧 → VO ───────┼→ StateEstimator ───────────────┐
-ToF ───────────────┘                                │
-                                                   │
-前视像素 → TargetTracker → TerminalGuidance ──────┤
-下视像素 → HomeDetector → Relocalization/Homing ──┤
-                                                   ↓
-IMU/速度/姿态 → ImpactDetector → ImpactRecovery → MissionFsm
-                                                   ↑
-局部障碍 → 预测风险/绕行 ─→ SafetyMonitor ─────────┤
-他机状态/未来轨迹 → CollisionCheck/SwarmAvoidance ┘
-                                                   ↓
-      Trajectory/Guidance → PosController → FcuSetpoint → UART adapter → FCU
-```
+因此下一步应优先冻结三个接口的字段和所有权，再做最小适配，不应重构现有核心。
 
-绝对基座观测通过创新门限和 1 秒冷却注入估计器，同时对齐光流坐标。目标与基座导航主要使用相对观测，减少短时全局漂移对末端动作的影响。
+## 2. 当前构建与依赖边界
 
-当导航和飞控分布在两块 MCU 上时，飞控独占 IMU、姿态/角速度环和电机混控，导航只消费
-带采样时间的状态并发送有有效期的速度/加速度候选目标。协议无关状态机、参考字节流和断线
-失效保护见[双 MCU 飞控 UART 桥接](fcu_uart_bridge.md)。
+`CMakeLists.txt` 明确设置 C99，并把目标分为：
 
-## 3. 任务与安全层次
+- `nav_core`：核心、感知数学、飞控中立契约与多机算法；
+- `nav_sim`：动力学、传感器、场景和故障注入，只供主机使用；
+- `nav_stm32_port`：`platform/stm32/nav_tasks.c` 装配骨架；
+- `mission_sim`、`swarm_sim`、`nav_replay`、`nav_telemetry_dump`、`fcu_bridge_sim`：主机程序；
+- 测试目标：当前 CTest 清单 82 项。
 
-顶层状态共 19 个：
+主机专用的 `stdio`、文件读写和命令行只出现在 `platform/host/` 与测试。`simulation/` 不应进入真实平台。`platform/stm32/nav_platform.h` 只声明板级函数，没有包含 STM32 HAL；因此它能在主机用桩编译，但其命名和函数集合仍是 STM32 候选装配，不是通用 Linux 接口。
+
+## 3. 当前实际数据流
+
+### 3.1 主机仿真
 
 ```text
-BOOT → SELF_CHECK → DOCKED → TAKEOFF → OUTBOUND → SEARCH
-  → TARGET_ACQUIRE → TARGET_TRACK → TERMINAL → IMPACT
-  → RECOVERY → BREAKAWAY → RETURN_HOME → HOME_SEARCH
-  → HOMING → DOCKING → DOCKED
-
-异常分支：ESTIMATOR_LOST → 恢复原任务或 EMERGENCY_LAND
-安全覆盖：EMERGENCY_STABILIZE → EMERGENCY_LAND
+simulation/*
+  → platform/host/main.c 构造 NavRuntimeInput
+  → nav_runtime_step()
+  → NavRuntimeOutput.guidance / control
+  → simulation/sim_dynamics.c
 ```
 
-返航内部记录 `RETURN_TRANSIT/HOME_APPROACH/HOME_SEARCH/HOME_ACQUIRED/HOMING`；归航记录粗定位、精细对准、下降和最终接近；停靠记录 marker 搜索、接近、对准、下降、捕获、接触和充电确认。
+这条链路验证软件状态机和数值行为，不验证真实传感器、通信、飞控或机体。
 
-安全覆盖优先级为：硬截止时间/围栏/持续碰撞危险/估计器 LOST/持续控制饱和 > 撞击恢复 > 返航请求 > 普通任务。碰撞危险需要连续满足配置时间才触发紧急覆盖，给局部避障一个确定的反应窗口；硬截止时间和围栏在恢复期间也不会被屏蔽。
+### 3.2 STM32 候选装配
 
-## 4. 估计与感知
-
-- `StateEstimator` 使用 IMU 预测、Mahony 型倾斜修正、光流 VO 水平修正和 ToF 高度修正。视觉创新、非有限值、时间步异常和长时间失效均有门限。
-- 光流尺度来自 ToF；VO 偏航默认不回灌 INS，避免同源陀螺误差形成正反馈。
-- `TargetTracker` 为 alpha-beta 固定状态跟踪器，输出相对位置、相对速度、方位、置信度和年龄。LOST 后新观测重新建轨，避免旧几何永久拒绝重捕获。
-- `HomeDetector` 输出滤波后的相对位置和偏航。marker 暂时丢失时，高于盲降高度返回搜索，低于阈值则允许受限盲降。
-- 当前没有真实特征提取、目标分类或 marker 解码器，这些属于板级视觉前端。
-
-## 5. 轨迹与障碍
-
-轨迹由固定最多 8 段的五次多项式组成。规划器采用以下顺序：
-
-1. 按巡航速度生成候选轨迹；
-2. 采样检查有限值、时长、速度、加速度、工作空间和障碍净空；
-3. 仅动力学约束超限时，最多按配置次数拉长时标；
-4. 已知少量局部障碍与线段相交时，插入确定性横向绕行点；
-5. 仍无有效轨迹时，退出多项式跟踪并使用限速航点制导。
-
-局部障碍模块最多保存 8 个对象，基于相对速度计算预测最近距离。WARNING 叠加横向速度，CRITICAL 输出脱离/爬升速度。它不是稠密地图规划器，不适合迷宫或大规模三维障碍环境。
-
-## 6. 撞击与恢复
-
-撞击检测融合四类证据：比力尖峰、角速度尖峰、速度跳变和姿态跳变，并包含任务阶段布防、连续样本确认、置信度和不应期。恢复阶段为：
+`platform/stm32/nav_tasks.c::nav_app_step()` 当前执行：
 
 ```text
-VISUAL_HOLD → ATTITUDE_RECOVERY → VELOCITY_DAMPING
-→ ESTIMATOR_CHECK → BREAKAWAY → COMPLETE
+nav_time_ms + nav_imu_read + nav_tof_read + nav_flow_read
+  + nav_camera_target_read + nav_camera_home_read + 其他输入
+  → NavRuntimeInput
+  → nav_runtime_step()
+  → fcu_setpoint_from_nav(..., FCU_CONTROL_AUTO, ...)
+  → nav_fcu_setpoint_write()
 ```
 
-稳定阶段受总恢复超时保护；BREAKAWAY 是已经受控的任务动作，不再被稳定阶段总超时误杀。估计器仅在恢复窗口内 LOST 时由恢复机接管；硬时间预算、围栏和人工急停仍直接进入安全覆盖。
+失败时 `nav_app_disable_fcu()` 发送禁用 setpoint，并调用 `nav_fcu_set_armed(0)`。成功时发送 setpoint 后调用 `nav_fcu_set_armed(runtime.output.armed)`。
 
-## 7. 多机接口
+这是一个固定内存、非阻塞意图明确的骨架，但存在两个关键事实：
 
-默认 `SWARM_DISABLED`，单机任务无需等待通信。启用时：
+- 它直接从多个板级读取函数拼装状态，没有调用 `FcuBridge`；
+- `nav_fcu_set_armed()` 的名称混合了“导航请求”和“飞控真实 armed 状态”，后续协议冻结时必须澄清，不应让导航覆盖飞控最终权限。
 
-- `AgentState` 带 `agent_id`、序号、时间戳、质量和观测年龄；
-- 48 字节状态帧使用显式小端编码、版本和 CRC，不能直接发送 C 结构体；
-- 固定容量邻机表拒绝回环、重复和倒序消息，并以本机接收时刻计算超时；
-- `TrajectoryMessage` 最多携带 8 个未来位置/速度采样点，并检查有效期；
-- 冲突检测在有限预测时间内比较未来间距；
-- 高 `agent_id` 对低 `agent_id` 确定性让行，避免双方同时随机改向。
+### 3.3 核心输入处理
 
-这是可验证的链路与避碰基础，不是完整群体编队或分布式优化器。未来轨迹网络帧、时钟同步、链路认证和实机带宽仍需后续实现。
+`core/runtime/nav_runtime.h::NavRuntimeInput` 当前包含：
 
-## 8. 论文思想与取舍
+- 必需 `ImuSample`；
+- 可选 `FlowFrame` 或 `OdomSample`；
+- ToF 高度；
+- `PixelObs` 目标和基座像素观测；
+- 障碍、邻机、任务/返航/紧急命令和停靠状态。
 
-| 来源 | 采用的思想 | 未采用内容 |
+`core/runtime/nav_runtime.c::nav_runtime_step()` 会：
+
+1. 检查输入年龄、重复、倒序和非有限值；
+2. 在光流存在时运行 `vf_update()`，否则使用 `OdomSample`；
+3. 调用 `estimator_update()` 形成 `NavState`；
+4. 将 `PixelObs` 通过 `camera_reconstruct_nav()` 转成 `TargetObs`；
+5. 调用 `target_tracker_update()`、任务、安全、规划、制导和位置控制；
+6. 输出 `GuidanceOutput` 与 `CtrlOutput`。
+
+这说明当前外部三维目标状态并未直接进入主链，外部融合飞行状态也没有直接替代核心估计器的入口。
+
+## 4. 当前类型复用评估
+
+### 4.1 FlightState
+
+相关现有类型：
+
+- `flight/flight_state/flight_state.h::FlightState` 只有模式、armed 和电压，且当前没有其他 C 源码引用；不足以承担统一飞行状态。
+- `core/state_estimator/state_estimator.h::NavState` 已包含位置、速度、姿态、角速度、线加速度、yaw、yaw rate、时间戳、有效性、质量、估计模式和健康状态；适合作为核心内部权威状态。
+- `flight/fcu_bridge/fcu_bridge.h::FcuStateSnapshot` 包含有效位、能力、姿态、角速度、加速度、本地位置/速度、高度、电量和飞控状态；适合作为外部飞控状态包的基础。
+- `OdomSample` 只包含位姿、速度、有效标志和时间戳，适合估计器观测，不足以单独表达完整 FlightState 和来源质量。
+
+结论：不要再新建一套与 `NavState` / `FcuStateSnapshot` 高度重复的结构。`FlightState` 应先作为接口语义名称：外部适配器基于 `FcuStateSnapshot` 或外部 VIO数据归一化，唯一状态提供者再映射为现有核心输入/状态。若后续确实需要新 ABI，应从现有字段演进并删除或弃用当前未使用的简化 `FlightState`，避免三个并行权威结构。
+
+### 4.2 TargetObservation
+
+相关现有类型：
+
+- `perception/camera/camera.h::PixelObs`：二维像素、尺寸、可见性和时间戳；
+- `perception/target_tracker/target_tracker.h::TargetObs`：三维相对位置、bearing、置信度和时间戳；
+- `TargetTrack`：在跟踪输出中增加相对速度、范围、年龄和状态。
+
+`TargetObs` 已是最接近目标接口的类型，应扩展或在其外增加薄适配元数据，不应另建完全重复结构。当前缺失：坐标系 ID、有效字段 mask、来源 ID、可选目标速度以及明确的采样/接收时间语义。
+
+结论：`TargetObservation` 作为跨组契约建议以演进后的 `TargetObs` 为核心。`PixelObs` 保留为仿真/兼容输入；若视觉组给三维结果，适配器直接产生规范化 `TargetObs`，禁止再次调用 `camera_reconstruct_nav()`。
+
+### 4.3 FlightCommand
+
+相关现有类型：
+
+- `GuidanceOutput`：位置、速度、加速度、yaw 和选择标志；
+- `CtrlOutput`：当前内部位置控制器产生的加速度与 yaw rate；
+- `FcuSetpoint`：序号、生成时间、有效字段、位置/速度/加速度、yaw/yaw rate、有效期、控制偏好和 `motion_enabled`。
+
+结论：`FcuSetpoint` 已经满足大部分 `FlightCommand` 要求，应作为统一外部指令的基础，不需要再复制一个命令结构。需要冻结的是：`motion_enabled` 的授权语义、唯一命令所有者、飞控能力选择、过期动作、模式反馈和导航请求与飞控实际 armed 状态的区别。
+
+## 5. 三类接口的 Draft 契约
+
+以下为设计建议，不是本轮新增结构体或跨组已确认协议。
+
+### 5.1 FlightState 语义
+
+最小字段：
+
+| 字段 | 要求 | 可复用来源 |
 |---|---|---|
-| EGO-Planner | 只在必要范围处理障碍、轨迹生成后检查动力学可行性 | ESDF/梯度优化器和 ROS 实现 |
-| EGO-Swarm | 共享未来轨迹、消息时效、去中心化冲突处理 | 完整拓扑搜索和在线非线性优化 |
-| Distributed Swarm Trajectory Optimization | 将空间、时间和碰撞约束统一放入轨迹验证视角 | 编队相似度优化和大规模联合求解 |
-| Bearing-based Relative Localization | 相对观测、部分可见和观测图时效的重要性 | SDP/流形优化定位器 |
-| Swarm of micro flying robots in the wild | 小型化、任务扩展性和轨迹共享的系统分层 | 掌上平台完整感知计算栈的直接复制 |
-| GCOPTER | 固定多项式表示、时标与约束后验证 | 一般几何约束优化和高阶求解器 |
+| `source_id` | 飞控融合、外部 VIO、内部估计等枚举；任一时刻仅一个 active | 新增元数据 |
+| `frame_id` | 明确导航局部系或机体系，禁止靠注释猜测 | 新增元数据 |
+| `sample_timestamp` | 传感/估计采样时间 | `source_timestamp_ms` / `timestamp_ms` |
+| `received_timestamp` | 本机接收时间，用于链路年龄 | `FcuBridge.received_at_ms` |
+| 位置/速度/姿态 | SI 单位、四元数顺序明确 | `NavState` / `FcuStateSnapshot` |
+| 角速度/线加速度 | 明确机体系与比力/线加速度语义 | 现有字段 |
+| `valid_mask` | 每个字段独立有效 | `FcuStateSnapshot.valid_mask` |
+| `quality` / health | 可比较但不假设所有来源同一算法 | `NavState.quality/status` + 适配映射 |
 
-论文是设计参考，不是当前实现已达到论文实验能力的证明。
+所有权：平台状态适配器拥有协议解析和坐标/时间转换；`FlightStateProvider` 拥有唯一来源选择；`NavRuntime` 只消费一个已选状态或其现有采样形式。
 
-## 9. 验证矩阵
+切换规则：备用来源不能静默覆盖主来源。切换必须经过显式状态机，至少记录旧/新来源、原因、时间、位置/速度跳变和是否需要保持/中止。硬件未定前不冻结自动切换阈值。
 
-CTest 当前包含 82 项：模块测试、双 MCU UART 故障回归、集群链路和 STM32 适配测试、默认闭环、确定性日志回放、9 个具名压力场景、8 个端到端故障回归、4 个遥测集成测试、5 个多运行时网络回归和 32 个随机/撞击回归。共享运行时与诊断测试覆盖默认配置校验、输入过期/重复/乱序、连续周期 watchdog、事件环覆盖、无效输入拒绝、结构性轨迹错误保持可见，以及蜂群严重冲突进入统一安全链路。FCU 测试覆盖状态/指令编解码、字节流重同步、序号回绕、输入超时、指令过期和恢复重同步；集群链路测试覆盖帧校验、序号与毫秒计数回绕、重复/倒序/超时/满表处理，并验证解码后的邻机状态能够触发碰撞检测；STM32 契约测试覆盖每周期接收预算、坏帧隔离、发送降采样和队列满丢弃。多机网络回归覆盖 2/4 个独立运行时、延迟、丢包、乱序、链路中断和冲突邻机失联保护。具名场景除了要求停靠成功，还要求对应事件标志被置位，例如目标观测中断、基座 marker 不可用、局部障碍风险与绕行点、强制返航或双机冲突。故障回归进一步验证可恢复故障继续完成任务、必需输入异常立即拒绝并输出零控制，以及连续调度超时进入紧急降落。
+### 5.2 TargetObservation 语义
 
-主机仿真验证的是软件状态机、数值边界和模块组合，不等价于实机稳定性证明。上机前仍需完成坐标/单位检查、SIL/HIL、最坏执行时间、栈和静态 RAM、传感器断连、急停、接触结构及充电联锁测试。
+最小字段：
+
+| 字段 | 要求 | 当前复用 |
+|---|---|---|
+| 可见/有效 | 与“消息收到”分离 | `TargetObs.visible` |
+| 观测类型 | pixel、bearing、3D position、pose 等 | 新增枚举/valid mask |
+| 坐标系 ID | camera/body/nav-local；必须显式 | 新增元数据 |
+| 采样时间 | 视觉曝光/推理对应时间，不使用到达时间替代 | `timestamp_ms` 可复用 |
+| 三维相对位置/bearing | 视觉组给三维时直接使用 | `rel_pos` / `bearing` |
+| 可选相对速度 | 只有视觉组确实提供或适配器有定义时有效 | 需扩展；不要伪造 |
+| 置信度 | 范围、无效值和门限所有者需确认 | `confidence` |
+| 来源/序列 | 支持诊断重复、乱序和多相机 | 新增元数据 |
+
+所有权：视觉组拥有识别结果；目标适配器拥有外参、坐标和时间归一化；`TargetTracker` 拥有短时跟踪与预测；制导不得回到原始图像重复识别。
+
+输入优先级建议：规范化三维 `TargetObs` 存在时使用它；否则才走旧 `PixelObs -> camera_reconstruct_nav()`。同一帧同时存在两者时必须拒绝或按明确配置选择，不能融合两次。
+
+### 5.3 FlightCommand 语义
+
+以 `FcuSetpoint` 为基础：
+
+| 字段 | 要求 |
+|---|---|
+| 速度 | 当前首选外部控制量，三维、SI 单位 |
+| 航向 | 飞控确认后选择 yaw 或 yaw rate，不能同时含糊生效 |
+| 生成时间/有效期 | 超时后飞控侧停止沿用最后命令 |
+| 控制模式 | velocity/acceleration/position 只选飞控明确支持的一种主模式 |
+| `motion_enabled` | 表示导航是否授权本条运动，不代表飞控已经解锁 |
+| 序号/来源 | 支持重复、乱序、重启与诊断 |
+| 失效动作 | 由飞控/平台适配器实现，导航只发禁用或停止授权 |
+
+所有权：`NavRuntime` 是任务级运动意图的唯一生产者；命令适配器只做能力选择、坐标/单位/协议转换和更严格的禁用；飞控拥有最终低层控制、解锁、限幅和失联动作。规则中安全员人工停桨由安全员和飞控链路负责，不属于本导航软件实现；本软件只需在接到外部中止状态后停止输出有效运动授权。
+
+## 6. 坐标、时间和单位建议
+
+状态：`Draft / 待视觉组与飞控组确认`。
+
+- 内部导航局部系建议使用右手 z-up，SI 单位；初始化 +X 的任务含义需由场地/任务配置给出。
+- 机体系建议右手 FLU（+X 前、+Y 左、+Z 上）；若飞控使用 NED/FRD，只能在飞控适配器中转换。
+- 四元数顺序和方向必须在字段名/测试向量中定义，例如 body-to-nav，不允许只写 `attitude`。
+- yaw 和 yaw rate 使用 rad、rad/s；位置/速度/加速度使用 m、m/s、m/s²。
+- 核心继续使用单调 `uint32_t` 毫秒并验证回绕；适配器保留采样时间与接收时间，必要时做时钟偏移估计。
+- 外参由目标适配层单点拥有。视觉组若输出相机系三维位置，导航适配器转换一次；视觉组若已输出约定导航系，不再二次变换。
+
+现有 `FcuStateSnapshot` 注释只冻结了“local X/Y、正 Z 向上”，尚未完整定义 X/Y 朝向、body 轴和四元数方向，因此当前不能声称坐标契约已 Frozen。
+
+## 7. 数据与控制所有权
+
+| 数据/动作 | 唯一所有者 | 其他模块权限 |
+|---|---|---|
+| 原始视觉识别 | 外部视觉组 | 导航只消费结果和质量 |
+| 视觉外参/坐标归一化 | TargetObservationAdapter | 核心不解析相机/通信协议 |
+| 主飞行状态选择 | FlightStateProvider | 其他来源只能作为候选/备用 |
+| 任务状态、规划和末端制导 | NavRuntime | 平台不得再并行运行另一套任务制导 |
+| 最终导航运动指令 | FlightCommandOwner（由 NavRuntime 输出形成） | 适配器只能转换或禁用 |
+| 姿态、角速度、电机和实际 armed | 飞控 | 导航只能请求或读取状态 |
+| 人工紧急停桨 | 安全员与独立飞控链路 | 导航接收中止结果，不实现遥控逻辑 |
+
+必须禁止：
+
+- 两个模块同时发送最终速度 setpoint；
+- 两套定位未经显式仲裁同时成为主状态；
+- 外部三维目标再次按像素尺寸重建；
+- 导航把“请求解锁”当作“飞控已解锁”；
+- 适配器在命令过期后继续沿用最后速度。
+
+## 8. STM32 与 ARM Linux 适配边界
+
+### 8.1 STM32 候选适配层
+
+应实现：
+
+- 单调时钟与回绕安全比较；
+- 传感器/飞控状态接收、固定容量缓存和唯一快照；
+- 坐标、单位、时间和有效位转换；
+- 非阻塞 FCU TX、外部中止输入、日志和遥测队列；
+- 固定调度预算、栈/静态 RAM/最坏执行时间测量；
+- DMA/中断与任务优先级，但不把 HAL 暴露给 `nav_core`。
+
+现有 `platform/stm32/nav_platform.h` 和 `NavApp` 可保留为起点。需要最小补齐的是统一状态提供者，而不是整体改写。
+
+### 8.2 ARM Linux 候选适配层
+
+应实现：
+
+- `CLOCK_MONOTONIC` 或等价单调时间映射；
+- MAVLink/厂商 SDK/外部 VIO/视觉 IPC 的进程与连接生命周期；
+- 有界接收队列、最新快照和超时，不让阻塞 IO 进入核心周期；
+- 坐标、时间、单位和协议转换；
+- 进程 watchdog、日志和配置加载；
+- 与 C 核心之间的固定 C ABI。
+
+Linux 可以在适配层使用线程和动态内存，但不得把线程调度、STL 容器、异常或 SDK 类型传入 C99 核心。
+
+## 9. C++ 使用结论
+
+不需要整体迁移 C++。保留 C99 核心的理由：
+
+- 现有算法和 82 项测试都围绕该 ABI；
+- 固定内存和有界行为适合 MCU，也能作为 Linux 上的稳定库；
+- 当前缺口是接口和数据所有权，不是语言表达能力；
+- 整体迁移会制造大范围差异，却不解决硬件、坐标、时间和协议不确定性。
+
+可以新增 C++17/20 的场景：
+
+- Linux 上的 MAVLink/厂商 SDK 封装；
+- 外部 VIO 或视觉中间件客户端；
+- 线程、IPC、RAII 和复杂资源生命周期；
+- 仅主机使用的工具。
+
+边界要求：`extern "C"`、固定宽度整数、显式长度缓冲区、错误码、调用者明确所有权；不跨接口传 STL、异常或裸资源句柄。
+
+## 10. 接口一致性验证
+
+保留现有主机仿真，并增加以下最小测试设计：
+
+1. 同一 FlightState 规范向量分别经过 host、STM32 桩和未来 Linux 适配器，比较核心可见字段。
+2. 覆盖 NED/FRD 到内部 z-up/FLU 的静止、倾斜、平移和 yaw 测试向量。
+3. 覆盖采样时间、接收时间、32 位回绕、过期、重复、倒序和来源重启。
+4. 同一目标分别以 pixel 兼容路径和已知三维路径输入，验证不会重复重建；视觉组实际三维样本走回放测试。
+5. 检查同一周期两种主状态或两种目标输入同时出现时被明确拒绝/选择。
+6. 检查 `FcuSetpoint` 的速度/yaw、有效期、`motion_enabled`、序号和禁用包在不同适配器编码后语义一致。
+7. 飞控状态过期、命令队列拒绝、外部中止输入和进程/链路重启后，导航不继续授权旧运动命令。
+
+这些测试先在主机运行；只有真实协议和硬件确定后才增加 SIL/HIL。不能用适配器桩测试替代实物通信证据。
+
+## 11. 十项评审问题逐项回答
+
+### 1. 哪些部分已经平台无关？
+
+`core/`、大部分 `perception/`、`flight/fcu_bridge/`、`swarm/` 使用 C99 和固定内存，没有平台 HAL/OS 依赖。`NavRuntime` 是共享装配入口，CMake 也把 `nav_core` 与 `nav_sim`、`nav_stm32_port` 分开。
+
+### 2. 哪些模块直接依赖平台或通信？
+
+`platform/host/` 依赖主机命令行和文件 IO；`simulation/` 依赖主机模型；`platform/stm32/nav_tasks.c` 依赖 `nav_platform.h` 的板级函数集合。`RMFC` 编解码是参考协议实现但仍为平台中立；真实 UART/MAVLink 驱动尚不存在。`px4_bluetooth_validation.md` 是候选验证说明，不是已实现依赖。
+
+### 3. 定位状态如何进入主链，缺口是什么？
+
+当前 `NavRuntimeInput` 通过必需 IMU、可选 Flow/Odom 和 ToF 进入 `estimator_update()`，形成 `NavState`。`FcuStateSnapshot` 可以由 `fcu_state_to_nav_samples()` 转成 IMU/Odom/height，但该路径未接入 `NavApp`。外部已融合 FlightState 没有包含来源/坐标/质量和唯一仲裁的正式入口，这是主要缺口。
+
+### 4. 如何支持不同定位来源？
+
+在平台边界建立唯一 `FlightStateProvider`，候选适配器先归一化，再显式选择一个 active 来源。优先复用 `FcuStateSnapshot`、`NavState` 和 `OdomSample`；只有现有字段确实不足时才演进类型。来源切换必须可观测、可拒绝，并能触发保持/中止。
+
+### 5. 如何接收视觉目标而不重复三维重建？
+
+演进 `TargetObs` 为正式规范化目标观测，并给 `NavRuntimeInput` 增加该入口；存在规范化三维观测时直接送 `target_tracker_update()`。旧 `PixelObs` 仅在视觉组提供二维结果或仿真兼容时运行 `camera_reconstruct_nav()`，两条路径互斥。
+
+### 6. 如何设计统一速度控制输出？
+
+复用 `FcuSetpoint` 作为 FlightCommand 基础，默认冻结“速度 + yaw/yaw rate 二选一 + 生成时间 + 有效期 + motion_enabled”。适配器按真实飞控能力映射，不能同时重复闭合速度和加速度环；过期与失联由飞控最终处理。
+
+### 7. STM32 与 ARM Linux 各需要什么？
+
+STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源测量；Linux 负责协议/SDK、线程/IPC、进程生命周期、单调时钟和有界队列。两者共同承担坐标/时间/单位/有效位转换，并调用相同 C99 核心。
+
+### 8. 是否需要 C++？
+
+核心不需要。Linux 的 SDK、通信、IPC 和资源管理可以使用 C++17/20，通过稳定 C ABI 连接。不存在为了候选 RK3566 整体迁移 C++ 的理由。
+
+### 9. 如何保留主机仿真并验证适配一致性？
+
+继续以 `nav_core` + `nav_sim` 为基线，新增与真实平台无关的规范向量、回放和适配器桩测试。同一标准化状态、目标和命令应在 host/STM32/Linux 边界得到一致字段和失效结果。
+
+### 10. 当前结构性迁移阻碍是什么？
+
+依严重性排序：目标只有像素正式入口；主状态没有唯一来源仲裁；FcuBridge 未进入 NavApp 主链；命令能力/授权未与真实飞控状态闭合；坐标与四元数契约不完整；Linux 适配不存在；`FlightState` 简化类型未使用且容易形成重复概念；时间同步与来源切换尚无接口测试。
+
+## 12. 改造分类
+
+### 可以保留不动
+
+- C99 `nav_core` 与算法实现；
+- `NavState`、`TargetTrack`、`GuidanceOutput`、`CtrlOutput` 的内部用途；
+- `FcuStateSnapshot` / `FcuSetpoint` 的大部分字段和参考测试；
+- 主机仿真、故障注入、回放、遥测和现有测试；
+- 撞击恢复、停靠和多机代码作为保留资产。
+
+### 建议最小修改
+
+- 让规范化 `TargetObs` 正式进入 `NavRuntimeInput`，并与 `PixelObs` 互斥；
+- 建立唯一 FlightState 来源/选择器并把 FcuBridge 接入平台装配；
+- 澄清/替换 `nav_fcu_set_armed` 的请求语义，避免冒充飞控真实状态；
+- 让命令生成使用飞控能力与活动状态；
+- 补充 frame、来源、有效位、采样/接收时间和接口一致性测试；
+- 将未使用的简化 `FlightState` 合并、弃用或明确仅代表飞控模式，避免重名。
+
+### 硬件确定后才能开发
+
+- MAVLink/厂商协议和真实设备驱动；
+- STM32 HAL/RTOS、ARM Linux 进程和外部 VIO SDK；
+- 时间同步、带宽、最坏延迟、控制模式和飞控失联配置；
+- 接近速度、接触参数和硬件资源预算。
+
+### 需要外部组确认
+
+- 视觉二维/三维输出、frame、时间、速率、置信度和速度；
+- 飞控状态/能力/控制模式和实际 armed 反馈；
+- 上层计算平台与定位来源；
+- 规则待定冲击参数和机体接触能力；
+- 安全员人工停桨链路只需向导航提供何种中止状态。
+
+## 13. 验证边界
+
+当前 82 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、失效处理和组合逻辑。它们不能证明：
+
+- STM32 或 ARM Linux 的资源和实时性；
+- 任一真实 VIO、视觉模块或飞控兼容；
+- MAVLink、UART、无线链路或时钟同步已经可用；
+- 真实机体接近/撞击稳定；
+- 软件已经满足比赛部署条件。
+
+规则中由安全员人工执行的停桨、飞出战场和飞行不稳定处置不纳入导航软件功能验收。导航软件只验收自身状态/目标/命令契约、失效后的停止授权，以及外部中止输入的响应。

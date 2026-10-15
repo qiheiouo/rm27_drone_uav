@@ -1,5 +1,7 @@
 # STM32 移植层
 
+> 状态：`Implemented 候选骨架 / 未硬件验证`。STM32 不是已确定的唯一上层平台；若最终采用 ARM Linux，应新增独立适配层并复用相同 `NavRuntime` 与飞控中立契约，而不是照搬本目录的 HAL/RTOS 假设。
+
 本目录提供板级接口契约和固定内存 `NavApp` 装配。`NavApp` 内部调用与主机仿真相同的 `NavRuntime`，本目录只读取板级输入并发送控制输出。它能在主机编译检查，但不包含具体 HAL、RTOS、相机检测器或低层飞控。
 
 ## 任务优先级
@@ -30,7 +32,7 @@
 
 `nav_telemetry_write` 接收完整的 152 字节遥测帧。板级实现必须在函数返回前复制到低优先级队列；队列满时立即返回负值，不能在导航任务中等待串口、USB、CAN 或存储设备。帧序号在队列拒绝前已经递增，因此接收端可通过序号间隙统计丢帧。默认每 10 次 `nav_app_step` 输出一帧，可在编译时覆盖 `NAV_APP_TELEMETRY_PERIOD_STEPS`；定义为 `0` 可完全关闭。
 
-## 双 MCU 飞控适配
+## STM32 与外部飞控适配
 
 飞控选型未确定时，板级代码只依赖 `FcuStateSnapshot` 和 `FcuSetpoint`，不让
 `NavRuntime` 直接包含 MAVLink 或具体厂商消息。飞控 UART 接收任务应当：
@@ -44,7 +46,7 @@
 适配器根据飞控能力选择速度或加速度字段，转换导航 z-up 坐标到飞控坐标，并映射
 `motion_enabled`、有效期和外部控制失联动作。它不得同时重复闭合速度和加速度控制环。
 队列拒绝通过 `NavApp.fcu_tx_drops` 统计。完整约定和故障仿真见
-[双 MCU 飞控 UART 桥接](../../docs/fcu_uart_bridge.md)。
+[飞控状态与指令链路参考设计](../../docs/fcu_uart_bridge.md)。
 
 ## 集群链路适配
 

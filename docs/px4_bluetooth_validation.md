@@ -1,5 +1,7 @@
 # PX4 蓝牙通信分级验证手册
 
+> 状态：`Draft / 候选验证`。PX4、MAVLink、蓝牙、STM32 和具体串口均未选定。本文只保留候选链路的分级验证方法，不构成当前架构依赖；若最终采用 ARM Linux、有线串口、CAN 或以太网，应在同一内部契约外另写对应适配。
+
 ## 先说结论
 
 当前项目已经有协议无关的 `FcuBridge`、`FcuStateSnapshot` 和 `FcuSetpoint`，并带有 `RMFC` 参考字节流；它们不是 PX4 的 MAVLink 帧。验证 PX4 时需要增加一个适配层，把 PX4 的 MAVLink 消息转换为项目内部结构，再把项目的速度或加速度目标转换为 PX4 支持的 Offboard setpoint。
@@ -23,7 +25,7 @@ Bluetooth Classic SPP 透明串口模块 B
 PX4 MAVLink 适配器 → FcuStateSnapshot / FcuSetpoint
 ```
 
-第一轮可以暂时用 PC 代替导航 MCU：PC 通过蓝牙得到一个 COM 口，用 `QGroundControl` 或 `pymavlink` 验证 MAVLink。PC 验证通过后，再把同一端换成导航 MCU 的 UART 驱动。
+第一轮可以用 PC 作为协议探针：PC 通过蓝牙得到一个 COM 口，用 `QGroundControl` 或 `pymavlink` 验证 MAVLink。通过后，再根据最终选型接入 STM32 UART 或 ARM Linux 的串口/网络适配器。
 
 不要把导航 MCU 的 `RMFC` 帧直接接到 PX4。PX4 不会识别它；需要使用 PX4 支持的 MAVLink 消息，或在 PX4 侧另外开发协议模块。
 
@@ -183,7 +185,7 @@ S7  系留低速实飞，最后才逐步开放运动范围
 platform/stm32/px4_mavlink_adapter.c/.h
     MAVLink 接收 → FcuStateSnapshot
     FcuSetpoint → SET_POSITION_TARGET_LOCAL_NED
-    nav_fcu_setpoint_write → 固定内存 UART/蓝牙 TX 队列
+    nav_fcu_setpoint_write → 目标平台的有界 UART/蓝牙 TX 队列
 ```
 
 这个适配器应作为飞控/板级代码存在，不应把 MAVLink 字段直接塞进 `core/`。现有 `FcuBridge`、状态超时、指令有效期和主机回归可以继续复用。
