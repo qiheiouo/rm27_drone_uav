@@ -129,6 +129,7 @@ int main(void)
     uint8_t packet[SIM_PACKET_CAPACITY];
     uint16_t packet_size;
     uint16_t state_sequence = 0u;
+    uint16_t motion_authorization_sequence = 1u;
     uint32_t now_ms;
     uint32_t command_received_at_ms = 0u;
     uint32_t state_decode_errors = 0u;
@@ -136,12 +137,13 @@ int main(void)
     uint32_t state_outage_drops = 0u;
     uint32_t command_outage_drops = 0u;
     uint32_t stale_steps = 0u;
-    uint32_t failsafe_steps = 0u;
+    uint32_t inactive_command_steps = 0u;
+    uint32_t disabled_command_steps = 0u;
     uint32_t fresh_command_steps = 0u;
     uint32_t max_state_age_ms = 0u;
     uint8_t command_seen = 0u;
     uint8_t stale_seen = 0u;
-    uint8_t failsafe_seen = 0u;
+    uint8_t inactive_command_seen = 0u;
     uint8_t recovered_seen = 0u;
     uint8_t recovery_inhibited_seen = 0u;
     uint8_t motion_request = 1u;
@@ -176,6 +178,9 @@ int main(void)
 
         if (now_ms == SIM_OUTAGE_END_MS + 40u) motion_request = 0u;
         if (now_ms == SIM_OUTAGE_END_MS + 50u) motion_request = 1u;
+        if (now_ms == SIM_OUTAGE_END_MS + 100u) {
+            motion_authorization_sequence++;
+        }
 
         if (fcu_link_encode_state(&outgoing_state, state_frame) != FCU_LINK_OK)
             return 2;
@@ -219,7 +224,8 @@ int main(void)
                 if (state_age_ms > max_state_age_ms) max_state_age_ms = state_age_ms;
             }
             if (fcu_bridge_make_setpoint(&bridge, &guidance, &control,
-                                         motion_request, now_ms,
+                                         motion_request,
+                                         motion_authorization_sequence, now_ms,
                                          &outgoing_command) &&
                 fcu_link_encode_setpoint(&outgoing_command, command_frame) ==
                     FCU_LINK_OK) {
@@ -259,17 +265,23 @@ int main(void)
             }
         }
 
-        if (command_seen && fcu_setpoint_is_fresh(
-                &received_command, command_received_at_ms, now_ms)) {
+        if (command_seen && fcu_setpoint_evaluate(
+                &received_command, command_received_at_ms, now_ms) ==
+                FCU_SETPOINT_ACTIVE) {
             fresh_command_steps++;
-            if (failsafe_seen && now_ms >= SIM_OUTAGE_END_MS) {
+            if (inactive_command_seen && now_ms >= SIM_OUTAGE_END_MS) {
                 recovered_seen = 1u;
             }
         } else if (command_seen) {
-            failsafe_steps++;
-            if (!failsafe_seen) {
-                failsafe_seen = 1u;
-                printf("[t=%.2f] EVENT FCU command expired; receiver failsafe active\n",
+            if (fcu_setpoint_evaluate(&received_command,
+                    command_received_at_ms, now_ms) ==
+                    FCU_SETPOINT_DISABLED) {
+                disabled_command_steps++;
+            }
+            inactive_command_steps++;
+            if (!inactive_command_seen) {
+                inactive_command_seen = 1u;
+                printf("[t=%.2f] EVENT command inactive; reference receiver inhibits motion\n",
                        (double)now_ms * 0.001);
             }
         }
@@ -284,18 +296,21 @@ int main(void)
            (unsigned long)state_outage_drops,
            (unsigned long)stale_steps,
            (unsigned long)max_state_age_ms);
-    printf("command fresh_steps=%lu failsafe_steps=%lu decode_errors=%lu "
+    printf("command fresh_steps=%lu disabled_steps=%lu inactive_steps=%lu "
+           "decode_errors=%lu "
            "outage_drops=%lu\n",
            (unsigned long)fresh_command_steps,
-           (unsigned long)failsafe_steps,
+            (unsigned long)disabled_command_steps,
+            (unsigned long)inactive_command_steps,
            (unsigned long)command_decode_errors,
            (unsigned long)command_outage_drops);
 
-    if (!stale_seen || !failsafe_seen || !recovered_seen ||
+    if (!stale_seen || !inactive_command_seen || !recovered_seen ||
         !recovery_inhibited_seen ||
         state_decode_errors != 1u || bridge.stats.stale_transitions != 1u ||
         bridge.stats.resynchronized_states != 1u ||
-        fresh_command_steps == 0u || state_uart.dropped != 0u ||
+        fresh_command_steps == 0u || disabled_command_steps == 0u ||
+        state_uart.dropped != 0u ||
         command_uart.dropped != 0u) {
         printf("FCU_BRIDGE_SIM_FAILED expectations not met\n");
         return 1;

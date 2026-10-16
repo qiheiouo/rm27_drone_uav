@@ -29,6 +29,8 @@ typedef struct {
     uint8_t request_emergency;
     /* Explicit host-side motion request; it is not FCU armed feedback. */
     uint8_t motion_authorization_request;
+    /* Increment for each deliberate authorize/cancel decision; zero is none. */
+    uint16_t motion_authorization_sequence;
 } NavMissionCommand;
 
 typedef struct {

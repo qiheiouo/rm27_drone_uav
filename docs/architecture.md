@@ -59,7 +59,7 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
   → nav_fcu_setpoint_write()
 ```
 
-`NavMissionCommand.motion_authorization_request` 是任务/平台侧授权请求。`NavApp` 只有在本周期运行时有效、任务处于运动状态且授权边沿有效时，才生成 `motion_enabled=1` 的最终包。定位、必需输入、命令数值或发送前置条件失效都会撤销授权并生成禁用包；恢复后持续为高的旧请求不能自动恢复，必须先拉低再重新拉高。`nav_fcu_set_motion_authorized()` 只报告主机最终授权状态，不表示飞控真实 armed 或已经执行。
+`NavMissionCommand.motion_authorization_request` 是任务/平台侧授权请求，`motion_authorization_sequence` 是明确授权/撤销决策的 16 位非零序号。`NavApp` 只有在本周期运行时有效、任务处于运动状态且收到新的授权决策序号时，才生成 `motion_enabled=1` 的最终包。定位、必需输入、命令数值或发送前置条件失效都会撤销授权并生成禁用包；恢复后旧序号无论请求保持高，还是由任务代码自动低→高，都不能恢复运动。`nav_fcu_set_motion_authorized()` 只报告主机最终授权状态，不表示飞控真实 armed 或已经执行。
 
 这是一个固定内存、非阻塞意图明确的骨架，但存在两个关键事实：
 
@@ -120,7 +120,7 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
 - `CtrlOutput`：当前内部位置控制器产生的完整速度命令、加速度与 yaw rate；
 - `FcuSetpoint`：序号、生成时间、有效字段、速度/加速度、yaw/yaw rate、有效期、显式控制模式、显式内部坐标系和 `motion_enabled`。
 
-结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一边沿授权原语。真实飞控能力选择、实际控制模式反馈、接受/执行状态和过期动作仍等待适配器与硬件验证。
+结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一带决策序号的授权原语。真实飞控能力选择、实际控制模式反馈、接受/执行状态和过期动作仍等待适配器与硬件验证。
 
 ## 5. 三类接口契约
 
@@ -185,14 +185,14 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 | `control_frame` | 当前只接受 `LOCAL_XY_Z_UP`；PX4 NED/FRD 转换只能在未来飞控适配层完成 |
 | `source_timestamp_ms` | 主机生成时刻；接收端新鲜度使用本地接收时刻加 `validity_ms` 判断，避免假定两端时钟已同步 |
 | `motion_enabled` | 已通过主机最终授权门；不表示飞控 armed、接受或执行 |
-| 禁用包 | `motion_enabled=0`、`valid_mask=0`、1 ms 有效期；其真实飞控效果待验证 |
+| 禁用包 | `motion_enabled=0`、`valid_mask=0`、1 ms 协议占位有效期；接收端先应用禁用，再判断普通运动命令 TTL；其真实飞控效果待验证 |
 | 数值检查 | 有效字段必须有限；NaN/Inf、模式/有效位不匹配、未知 frame 均拒绝成为运动包 |
 
-正式链路只有一处最终主机授权：`NavApp::motion_authorization`。授权成立需同时满足本周期 FlightState/必需输入有效、`NavRuntimeOutput.step_valid`、任务处于运动状态、命令模式/数值合法以及新的 `motion_authorization_request` 上升沿。任何前置条件失败都会撤销授权；恢复定位只恢复计算能力，不恢复授权。撤销后必须观察到一次低请求，后续新高请求才能重新授权。同周期故障与新高请求竞争时故障优先。
+正式链路只有一处最终主机授权：`NavApp::motion_authorization`。授权成立需同时满足本周期 FlightState/必需输入有效、`NavRuntimeOutput.step_valid`、任务处于运动状态、命令模式/数值合法、请求为高以及新的非零 `motion_authorization_sequence`。任何前置条件失败都会撤销授权；恢复定位只恢复计算能力，不恢复授权。同一决策序号下自动拉低再拉高仍保持禁用；只有任务/平台侧作出新的明确授权决策并递增序号才可恢复。同周期故障会读取并消费新的决策序号，以故障拒绝该次决策。
 
-定位输入被拒绝时，任务 FSM 保留原状态，不会在该失败周期进入 `MS_ESTIMATOR_LOST`；旧实现的制导/目标内部状态也可能被保留。当前实现会清零导航期望速度/控制、重置目标跟踪和末端制导状态，并由 `NavApp` 撤销最终授权。下一有效定位到来后，FSM 仍可继续原任务并重新计算期望速度，但没有新授权边沿只能发送禁用包。因此“定位恢复”与“恢复运动”已分离。
+定位输入被拒绝时，任务 FSM 保留原状态，不会在该失败周期进入 `MS_ESTIMATOR_LOST`；旧实现的制导/目标内部状态也可能被保留。当前实现会清零导航期望速度/控制、重置目标跟踪和末端制导状态，并由 `NavApp` 撤销最终授权。下一有效定位到来后，FSM 仍可继续原任务并重新计算期望速度，但没有新的授权决策序号只能发送禁用包。因此“定位恢复”与“恢复运动”已分离。
 
-任务侧把授权请求拉低可立即撤销后续运动包，再拉高可显式重新启动运动授权；它不会擅自把任务 FSM 重置到停机、悬停或降落状态，因为这些动作依赖真实飞控语义。安全员人工停桨由安全员和独立飞控链路负责；导航仍负责状态有效性、边界/输出约束和故障后的停止授权。具体飞控收到禁用包、零速度、超时或停止发送后会悬停、降落还是停机，在实测前均为待确认。
+任务侧把授权请求拉低可立即撤销后续运动包；重新拉高时还必须提供新的决策序号，不能由任务状态派生的布尔跳变自动恢复。授权门不会擅自把任务 FSM 重置到停机、悬停或降落状态，因此明确重授权后原有非目标航点任务仍可继续。安全员人工停桨由安全员和独立飞控链路负责；导航仍负责状态有效性、边界/输出约束和故障后的停止授权。具体飞控收到禁用包、零速度、超时或停止发送后会悬停、降落还是停机，在实测前均为待确认。
 
 ## 6. 坐标、时间和单位建议
 
@@ -285,7 +285,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 4. 同一目标分别以 pixel 兼容路径和已知三维路径输入，验证不会重复重建；视觉组实际三维样本走回放测试。
 5. 同一周期两种主状态的拒绝已覆盖；两种目标输入互斥留待 TargetObservation 阶段。
 6. 已检查 `FcuSetpoint` 的速度/yaw 互斥模式、frame、有效期、非有限值、`motion_enabled`、序号和禁用包参考编解码。
-7. 已检查 FlightState 失效、恢复但未重新授权、重新授权、任务侧撤销/重启、同周期故障竞争和桥接链路重同步；真实飞控队列、进程重启和 Failsafe 仍需 HIL/台架。
+7. 已检查 FlightState 失效、同序号请求自动低→高、显式新序号重新授权、任务侧撤销/重启、同周期故障竞争、禁用包延迟处理和桥接链路重同步；真实飞控队列、进程重启和 Failsafe 仍需 HIL/台架。
 
 这些测试先在主机运行；只有真实协议和硬件确定后才增加 SIL/HIL。不能用适配器桩测试替代实物通信证据。
 
@@ -313,7 +313,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 ### 6. 如何设计统一速度控制输出？
 
-复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一边沿授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。过期与失联后的真实动作由飞控最终处理，当前只验证主机不继续授权。
+复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一、带明确决策序号的授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。过期与失联后的真实动作由飞控最终处理，当前只验证主机不继续授权。
 
 ### 7. STM32 与 ARM Linux 各需要什么？
 

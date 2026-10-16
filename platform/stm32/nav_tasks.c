@@ -120,10 +120,16 @@ static void nav_app_write_fcu(NavApp *app, uint32_t timestamp_ms,
     nav_fcu_set_motion_authorized(motion_enabled);
 }
 
-static void nav_app_revoke_and_disable_fcu(NavApp *app,
-                                           uint32_t timestamp_ms)
+static void nav_app_reject_and_disable_fcu(
+    NavApp *app,
+    uint32_t timestamp_ms,
+    const NavMissionCommand *mission_command)
 {
-    fcu_motion_authorization_revoke(&app->motion_authorization);
+    (void)fcu_motion_authorization_update(
+        &app->motion_authorization,
+        mission_command->motion_authorization_request,
+        mission_command->motion_authorization_sequence,
+        0u);
     nav_app_write_fcu(app, timestamp_ms, 0u);
 }
 
@@ -174,9 +180,17 @@ void nav_app_step(NavApp *app, float dt)
 
     if (app == 0) return;
     time_ms = nav_time_ms();
+
+    mission_command.start = 0u;
+    mission_command.request_return = 0u;
+    mission_command.request_emergency = 0u;
+    mission_command.motion_authorization_request = 0u;
+    mission_command.motion_authorization_sequence = 0u;
+    (void)nav_mission_command_read(&mission_command);
+
     if (app->config_errors != NAV_CONFIG_ERROR_NONE ||
         nav_imu_read(&imu) != 0) {
-        nav_app_revoke_and_disable_fcu(app, time_ms);
+        nav_app_reject_and_disable_fcu(app, time_ms, &mission_command);
         return;
     }
 
@@ -195,11 +209,6 @@ void nav_app_step(NavApp *app, float dt)
     obstacles_valid = (nav_local_obstacles_read(&obstacles) == 0) ? 1u : 0u;
     nav_app_receive_swarm(app, time_ms, &swarm);
 
-    mission_command.start = 0u;
-    mission_command.request_return = 0u;
-    mission_command.request_emergency = 0u;
-    mission_command.motion_authorization_request = 0u;
-    (void)nav_mission_command_read(&mission_command);
     dock_status.contact = 0u;
     dock_status.charging = 0u;
     dock_status.wireless_charge_ready = 0u;
@@ -226,7 +235,7 @@ void nav_app_step(NavApp *app, float dt)
     if (!nav_runtime_step(&app->runtime, &input)) {
         nav_app_flush_events(app);
         nav_app_emit_telemetry(app, time_ms, 1u);
-        nav_app_revoke_and_disable_fcu(app, time_ms);
+        nav_app_reject_and_disable_fcu(app, time_ms, &mission_command);
         return;
     }
 
@@ -237,6 +246,7 @@ void nav_app_step(NavApp *app, float dt)
         fcu_motion_authorization_update(
             &app->motion_authorization,
             mission_command.motion_authorization_request,
+            mission_command.motion_authorization_sequence,
             (app->runtime.output.step_valid && app->runtime.output.armed)
                 ? 1u : 0u));
 }

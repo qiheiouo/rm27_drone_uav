@@ -51,7 +51,7 @@
 | 任务与制导 | 19 个任务状态、目标丢失处理、末端制导、返航、停靠和紧急降落 |
 | 撞击处理 | 撞击检测、视觉保持、姿态恢复、速度阻尼、估计器检查和脱离；属于保留资产，不代表已经完成真实撞击验证 |
 | 轨迹与安全 | 固定容量轨迹、限速限加速度、围栏、输入时效、watchdog、控制饱和和碰撞风险处理 |
-| FCU 契约 | `FcuStateSnapshot`、唯一 `FcuSetpoint`/FlightCommand、显式控制与航向模式、local z-up、边沿授权、参考字节流和断线回归；尚未接入具体飞控 |
+| FCU 契约 | `FcuStateSnapshot`、唯一 `FcuSetpoint`/FlightCommand、显式控制与航向模式、local z-up、带决策序号的授权、参考字节流和断线回归；尚未接入具体飞控 |
 | 多机扩展 | 可关闭的邻机状态、未来冲突和失联保护；不属于当前最优先主线 |
 | 诊断与复现 | 固定内存事件环、二进制遥测、CSV 回放和确定性故障注入 |
 
@@ -63,7 +63,7 @@
 
 - 飞行状态：第一阶段 `FlightState` 契约已冻结为局部右手 z-up、SI 单位、body-to-nav WXYZ 四元数和导航本地单调毫秒时间；`NavRuntimeConfig.flight_state_source` 在启动时互斥选择原有内部估计链或外部融合状态。真实定位适配、时钟同步和硬件验证仍待选型。
 - 目标观测：`TargetObs` 已接近三维相对目标接口，但 `NavRuntimeInput` 目前只正式接收 `PixelObs` 并在核心内重建三维位置；外部视觉已提供三维结果时会缺少无重复重建的入口。
-- 飞行指令：`FcuSetpoint` 已是统一 `FlightCommand`。`CtrlOutput.velocity_cmd` 是导航期望速度，`NavApp` 是正式链路的最终主机授权所有者；velocity/acceleration 与 yaw/yaw-rate 分别互斥，内部 frame 固定为 local XY、Z-up，定位恢复必须经过新的低→高授权边沿才能重新发送运动包。真实飞控能力、NED/FRD 转换、armed/接受/执行反馈和 Failsafe 仍待适配与硬件验证。
+- 飞行指令：`FcuSetpoint` 已是统一 `FlightCommand`。`CtrlOutput.velocity_cmd` 是导航期望速度，`NavApp` 是正式链路的最终主机授权所有者；velocity/acceleration 与 yaw/yaw-rate 分别互斥，内部 frame 固定为 local XY、Z-up，定位恢复后必须收到新的非零授权决策序号才能重新发送运动包，单纯请求低→高不能代替新决策。真实飞控能力、NED/FRD 转换、armed/接受/执行反馈和 Failsafe 仍待适配与硬件验证。
 
 详细证据、数据所有权和最小改造清单见[软件架构与平台无关化评审](docs/architecture.md)。
 

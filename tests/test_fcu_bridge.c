@@ -126,6 +126,10 @@ int main(void)
           FCU_BRIDGE_REJECTED_OUT_OF_ORDER);
     CHECK(fcu_bridge_get_state(&bridge, 120u, &decoded_state, &age_ms));
     CHECK(age_ms == 20u);
+    make_nav_command(&guidance, &control);
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 1u,
+                                   120u, &setpoint));
+    CHECK(setpoint.motion_enabled);
     CHECK(fcu_bridge_update(&bridge, 151u) == FCU_BRIDGE_STALE);
     CHECK(bridge.stats.stale_transitions == 1u);
     decoded_state = state;
@@ -135,17 +139,19 @@ int main(void)
           FCU_BRIDGE_RESYNCHRONIZED);
     CHECK(bridge.stats.resynchronized_states == 1u);
 
-    make_nav_command(&guidance, &control);
-    /* Link recovery does not restore a high request; observe low then re-arm. */
-    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 165u,
-                                   &setpoint));
+    /* Link recovery and an automatic low/high cycle cannot reuse decision 1. */
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 1u,
+                                   165u, &setpoint));
     CHECK(!setpoint.motion_enabled);
     CHECK(setpoint.valid_mask == 0u);
-    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 0u, 166u,
-                                   &setpoint));
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 0u, 1u,
+                                   166u, &setpoint));
     CHECK(!setpoint.motion_enabled);
-    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 170u,
-                                   &setpoint));
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 1u,
+                                   167u, &setpoint));
+    CHECK(!setpoint.motion_enabled);
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 2u,
+                                   170u, &setpoint));
     CHECK(setpoint.control_mode == FCU_CONTROL_VELOCITY);
     CHECK(setpoint.control_frame == FCU_CONTROL_FRAME_LOCAL_XY_Z_UP);
     CHECK(setpoint.yaw_control == FCU_YAW_CONTROL_ANGLE);
@@ -160,6 +166,10 @@ int main(void)
     CHECK(decoded_setpoint.control_frame ==
           FCU_CONTROL_FRAME_LOCAL_XY_Z_UP);
     CHECK(decoded_setpoint.yaw_control == FCU_YAW_CONTROL_ANGLE);
+    CHECK(fcu_setpoint_evaluate(&decoded_setpoint, 180u, 280u) ==
+          FCU_SETPOINT_ACTIVE);
+    CHECK(fcu_setpoint_evaluate(&decoded_setpoint, 180u, 281u) ==
+          FCU_SETPOINT_EXPIRED);
     CHECK(fcu_setpoint_is_fresh(&decoded_setpoint, 180u, 280u));
     CHECK(!fcu_setpoint_is_fresh(&decoded_setpoint, 180u, 281u));
 
@@ -203,8 +213,8 @@ int main(void)
         FCU_CAP_YAW_RATE_SETPOINT | FCU_CAP_EXTERNAL_CONTROL;
     CHECK(fcu_bridge_ingest_state(&bridge, &state, 1000u) ==
           FCU_BRIDGE_ACCEPTED);
-    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 1010u,
-                                   &setpoint));
+    CHECK(fcu_bridge_make_setpoint(&bridge, &guidance, &control, 1u, 1u,
+                                   1010u, &setpoint));
     CHECK(setpoint.control_mode == FCU_CONTROL_ACCELERATION);
     CHECK(setpoint.yaw_control == FCU_YAW_CONTROL_RATE);
     CHECK((setpoint.valid_mask & FCU_SETPOINT_VALID_ACCELERATION) != 0u);
@@ -240,6 +250,10 @@ int main(void)
     CHECK(setpoint.valid_mask == 0u);
     CHECK(setpoint.yaw_control == FCU_YAW_CONTROL_NONE);
     CHECK(fcu_link_encode_setpoint(&setpoint, command_frame) == FCU_LINK_OK);
+    CHECK(fcu_setpoint_evaluate(&setpoint, 5000u, 5000u) ==
+          FCU_SETPOINT_DISABLED);
+    CHECK(fcu_setpoint_evaluate(&setpoint, 5000u, 6000u) ==
+          FCU_SETPOINT_DISABLED);
     CHECK(!fcu_setpoint_is_fresh(&setpoint, 2000u, 2000u));
 
     if (failures == 0) {

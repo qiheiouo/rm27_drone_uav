@@ -61,7 +61,7 @@
 | 最终上层计算平台 | `待确认` | STM32 与 ARM Linux 均保留；RK3566 只是 ARM Linux 候选 |
 | 主定位来源 | `待确认` | 可能来自飞控融合、外部 VIO 或其他来源；必须只有一个活动主状态 |
 | FlightState 最小输入契约 | `Frozen / Sim-verified` | 已实现外部融合状态直通、静态单一来源、超时/无效拒绝和恢复；未接真实定位设备 |
-| FlightCommand 最小输出契约 | `Frozen / Sim-verified` | `FcuSetpoint` 为唯一结构；显式速度/加速度、yaw/yaw-rate、local z-up、时效和边沿重授权；未接真实飞控 |
+| FlightCommand 最小输出契约 | `Frozen / Sim-verified` | `FcuSetpoint` 为唯一结构；显式速度/加速度、yaw/yaw-rate、local z-up、时效和带决策序号的重授权；未接真实飞控 |
 | MicoAir MicoVIO | `待确认` | 只是外部 VIO 候选，不进入核心依赖 |
 | 飞控与上层协议 | `待确认` | PX4/MAVLink 是重点候选；现有 `RMFC` 是参考编码，不是真实驱动 |
 | 外部视觉数据契约 | `Draft` | 需要视觉组确认二维/三维、坐标系、时间戳、速率、置信度和速度字段 |
@@ -89,7 +89,7 @@
 - `FlightState` 最小字段与坐标/时间约定、`NavRuntimeConfig.flight_state_source` 静态互斥选择、外部状态直达 `NavState`、超时/无效/非有限值/双来源拒绝和定位恢复；
 - `FlightCommand` 复用 `FcuSetpoint`，最终主控制模式和航向模式互斥，内部 frame 固定为 local XY、Z-up；
 - `CtrlOutput.velocity_cmd` 表示导航期望速度，`NavApp` 通过唯一 `FcuMotionAuthorization` 门后才形成已授权命令；
-- 定位/必需输入失效会清零旧期望、重置目标相关状态并撤销授权，定位恢复不会自动恢复运动，必须先撤销请求再重新授权；
+- 定位/必需输入失效会清零旧期望、重置目标相关状态并撤销授权，定位恢复不会自动恢复运动；任务/平台侧必须递增非零授权决策序号作出新的明确授权，布尔请求自动低→高不能重新授权；
 - 命令过期、NaN/Inf、模式不匹配、任务侧撤销/重启和同周期故障竞争已有主机测试；原 SIL 计算与动力学链保持兼容。
 
 后续仍需：

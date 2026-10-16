@@ -62,10 +62,12 @@ NED 数据直接交给 `NavRuntime`。在两块 MCU 尚未完成时钟同步时�
 - 不支持这两种接口时，不得悄悄退化成电机输出；需要重新评估飞控选型或单独设计遥控量适配。
 
 `NavApp` 是正式装配路径唯一的最终主机授权所有者。`NavMissionCommand.motion_authorization_request`
-是请求，不是飞控 armed 反馈；只有本周期状态有效、任务处于运动状态且观察到有效低→高边沿时，
-`FcuMotionAuthorization` 才允许生成 `motion_enabled=1` 的包。运行时输入、命令数值/模式或发送前置
-条件失效会撤销授权；定位恢复后持续保持高的旧请求不会自动恢复，必须先拉低再重新拉高。同周期
-故障和新高请求竞争时故障优先。
+是请求，不是飞控 armed 反馈；`motion_authorization_sequence` 是任务/平台侧每次明确授权或撤销决策
+递增的 16 位非零序号，零表示没有决策。只有本周期状态有效、任务处于运动状态、请求为高且序号
+相对上次决策为新时，`FcuMotionAuthorization` 才允许生成 `motion_enabled=1` 的包。运行时输入、命令
+数值/模式或发送前置条件失效会撤销授权；同一序号下持续为高或自动低→高都不能恢复运动。故障周期
+仍读取并消费新决策，以故障拒绝该次决策；恢复后必须再作出新的明确授权。序号按 16 位回绕比较，
+任务命令生产者重启时必须与 `NavApp` 重新同步，不能静默把旧序号当成新决策。
 
 候选装配默认使用 velocity + yaw angle，可分别由 `NAV_APP_FCU_CONTROL_MODE` 和
 `NAV_APP_FCU_YAW_CONTROL` 在板级编译配置中选择。yaw angle 与 yaw rate 的未来最终选择尚未冻结；
@@ -73,9 +75,13 @@ NED 数据直接交给 `NavRuntime`。在两块 MCU 尚未完成时钟同步时�
 
 每条命令带序号、生成时间和有效期。默认有效期为 100 ms，可用
 `NAV_APP_FCU_COMMAND_VALIDITY_MS` 覆盖；接收侧以本地接收时刻计算年龄。禁用包为
-`motion_enabled=0`、`valid_mask=0`、1 ms 有效期。`nav_fcu_set_motion_authorized()` 只报告主机
-最终授权状态，不代表飞控已解锁、接受或执行。队列拒绝由 `NavApp.fcu_tx_drops` 计数并撤销授权，
-本地命令构造拒绝由 `fcu_command_rejections` 计数。
+`motion_enabled=0`、`valid_mask=0`、1 ms 协议占位有效期。参考接收顺序是：解码和完整性/数值校验，
+若 `motion_enabled=0` 则立即返回 `FCU_SETPOINT_DISABLED`，只有运动包才按本地接收时刻和
+`validity_ms` 区分 `ACTIVE`/`EXPIRED`。因此线上延迟不消耗 TTL，调度延迟也不能把已收到的合法禁用
+包降级为可忽略的普通过期包；`fcu_setpoint_is_fresh()` 仅表示“新鲜且允许运动”，不能作为丢弃禁用包
+的接收过滤器。`nav_fcu_set_motion_authorized()` 只报告主机最终授权状态，不代表飞控已解锁、接受或
+执行。队列拒绝由 `NavApp.fcu_tx_drops` 计数并撤销授权，本地命令构造拒绝由
+`fcu_command_rejections` 计数。
 
 ## 链路健康状态机
 
@@ -84,7 +90,7 @@ NED 数据直接交给 `NavRuntime`。在两块 MCU 尚未完成时钟同步时�
 ```text
 WAITING → ACTIVE → STALE
                     ↓ 新的有效状态（仅恢复计算）
-                  ACTIVE ──→ 等待新的低→高运动授权
+                  ACTIVE ──→ 等待新的授权决策序号
 ```
 
 默认 50 ms 没有收到新的飞控状态就进入 `STALE`，导航侧不再生成运动指令。活动链路拒绝
@@ -136,7 +142,8 @@ WAITING → ACTIVE → STALE
 ```
 
 确定性仿真包含 20 ms 传输延迟、字节流噪声、单帧 CRC 损坏和 300 ms 双向中断。它必须
-观察到导航侧状态超时、飞控侧指令过期、恢复后仍禁止运动、显式重授权以及序号重新同步，并输出
+观察到导航侧状态超时、飞控侧指令过期、恢复后同序号自动低→高仍禁止运动、显式新决策重授权、
+禁用包独立于 TTL 的接收语义以及状态序号重新同步，并输出
 `FCU_BRIDGE_SIM_SUCCESS`。
 
 ## 选型后仍需完成

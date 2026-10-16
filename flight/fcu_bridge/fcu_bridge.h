@@ -124,6 +124,14 @@ typedef enum {
     FCU_LINK_PARSE_REJECTED
 } FcuLinkParseResult;
 
+/* Receiver disposition; DISABLED is applied before normal TTL expiry. */
+typedef enum {
+    FCU_SETPOINT_REJECTED = 0,
+    FCU_SETPOINT_DISABLED,
+    FCU_SETPOINT_ACTIVE,
+    FCU_SETPOINT_EXPIRED
+} FcuSetpointDisposition;
+
 /* All vectors use the navigation frame: local X/Y and positive Z upward. */
 typedef struct {
     uint16_t sequence;
@@ -167,14 +175,11 @@ typedef struct {
     FcuControlFrame control_frame;
 } FcuBridgeConfig;
 
-/*
- * Edge-triggered host motion authority. A prerequisite failure revokes the
- * grant and a low request followed by a new high request is required before
- * motion can be granted again.
- */
+/* A grant requires a new explicit, nonzero authorization decision sequence. */
 typedef struct {
+    uint16_t last_decision_sequence;
     uint8_t granted;
-    uint8_t rearm_ready;
+    uint8_t decision_seen;
 } FcuMotionAuthorization;
 
 typedef struct {
@@ -225,6 +230,7 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
                                  const GuidanceOutput *guidance,
                                  const CtrlOutput *control,
                                  uint8_t motion_authorization_request,
+                                 uint16_t motion_authorization_sequence,
                                  uint32_t now_ms,
                                  FcuSetpoint *setpoint);
 
@@ -245,6 +251,7 @@ void fcu_motion_authorization_revoke(FcuMotionAuthorization *authorization);
 uint8_t fcu_motion_authorization_update(
     FcuMotionAuthorization *authorization,
     uint8_t motion_requested,
+    uint16_t decision_sequence,
     uint8_t prerequisites_valid);
 
 /* Build a protocol-neutral command envelope for a board-specific adapter. */
@@ -260,6 +267,11 @@ uint8_t fcu_setpoint_from_nav(const GuidanceOutput *guidance,
                               FcuSetpoint *setpoint);
 void fcu_setpoint_disable(uint16_t sequence, uint32_t timestamp_ms,
                           FcuSetpoint *setpoint);
+FcuSetpointDisposition fcu_setpoint_evaluate(
+    const FcuSetpoint *setpoint,
+    uint32_t received_at_ms,
+    uint32_t now_ms);
+/* Compatibility helper: true only for a fresh, motion-enabled command. */
 uint8_t fcu_setpoint_is_fresh(const FcuSetpoint *setpoint,
                               uint32_t received_at_ms, uint32_t now_ms);
 

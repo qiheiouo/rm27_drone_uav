@@ -364,35 +364,46 @@ uint8_t fcu_bridge_get_state(FcuBridge *bridge, uint32_t now_ms,
 void fcu_motion_authorization_init(FcuMotionAuthorization *authorization)
 {
     if (authorization == 0) return;
+    authorization->last_decision_sequence = 0u;
     authorization->granted = 0u;
-    authorization->rearm_ready = 1u;
+    authorization->decision_seen = 0u;
 }
 
 void fcu_motion_authorization_revoke(FcuMotionAuthorization *authorization)
 {
     if (authorization == 0) return;
     authorization->granted = 0u;
-    authorization->rearm_ready = 0u;
 }
 
 uint8_t fcu_motion_authorization_update(
     FcuMotionAuthorization *authorization,
     uint8_t motion_requested,
+    uint16_t decision_sequence,
     uint8_t prerequisites_valid)
 {
-    if (authorization == 0 || motion_requested > 1u ||
-        prerequisites_valid > 1u || !prerequisites_valid) {
+    uint8_t new_decision;
+    if (authorization == 0) return 0u;
+    if (motion_requested > 1u || prerequisites_valid > 1u) {
         fcu_motion_authorization_revoke(authorization);
         return 0u;
     }
-    if (!motion_requested) {
-        authorization->granted = 0u;
-        authorization->rearm_ready = 1u;
-        return 0u;
+
+    new_decision = decision_sequence != 0u &&
+        (!authorization->decision_seen ||
+         sequence_newer(decision_sequence,
+                        authorization->last_decision_sequence));
+    if (new_decision) {
+        authorization->last_decision_sequence = decision_sequence;
+        authorization->decision_seen = 1u;
+        authorization->granted =
+            (motion_requested && prerequisites_valid) ? 1u : 0u;
+        return authorization->granted;
     }
-    if (authorization->rearm_ready) {
-        authorization->granted = 1u;
-        authorization->rearm_ready = 0u;
+
+    if (!prerequisites_valid || !motion_requested ||
+        !authorization->decision_seen ||
+        decision_sequence != authorization->last_decision_sequence) {
+        fcu_motion_authorization_revoke(authorization);
     }
     return authorization->granted;
 }
@@ -464,6 +475,7 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
                                  const GuidanceOutput *guidance,
                                  const CtrlOutput *control,
                                  uint8_t motion_authorization_request,
+                                 uint16_t motion_authorization_sequence,
                                  uint32_t now_ms,
                                  FcuSetpoint *setpoint)
 {
@@ -475,7 +487,8 @@ uint8_t fcu_bridge_make_setpoint(FcuBridge *bridge,
         return 0u;
     }
     if (!fcu_motion_authorization_update(&bridge->motion_authorization,
-                                         motion_authorization_request, 1u)) {
+                                         motion_authorization_request,
+                                         motion_authorization_sequence, 1u)) {
         fcu_setpoint_disable(bridge->next_command_sequence++, now_ms,
                              setpoint);
         return 1u;
@@ -594,9 +607,21 @@ uint8_t fcu_state_to_nav_samples(const FcuStateSnapshot *state,
 uint8_t fcu_setpoint_is_fresh(const FcuSetpoint *setpoint,
                               uint32_t received_at_ms, uint32_t now_ms)
 {
-    if (!setpoint_is_valid(setpoint) || !setpoint->motion_enabled) return 0u;
-    return ((uint32_t)(now_ms - received_at_ms) <= setpoint->validity_ms)
-        ? 1u : 0u;
+    return fcu_setpoint_evaluate(setpoint, received_at_ms, now_ms) ==
+        FCU_SETPOINT_ACTIVE ? 1u : 0u;
+}
+
+FcuSetpointDisposition fcu_setpoint_evaluate(
+    const FcuSetpoint *setpoint,
+    uint32_t received_at_ms,
+    uint32_t now_ms)
+{
+    if (!setpoint_is_valid(setpoint)) return FCU_SETPOINT_REJECTED;
+    if (!setpoint->motion_enabled) return FCU_SETPOINT_DISABLED;
+    if ((uint32_t)(now_ms - received_at_ms) > setpoint->validity_ms) {
+        return FCU_SETPOINT_EXPIRED;
+    }
+    return FCU_SETPOINT_ACTIVE;
 }
 
 uint32_t fcu_link_crc32(const uint8_t *data, uint16_t size)

@@ -119,6 +119,7 @@ int main(void)
     supplied_command.request_return = 0u;
     supplied_command.request_emergency = 0u;
     supplied_command.motion_authorization_request = 0u;
+    supplied_command.motion_authorization_sequence = 0u;
 
     /* Put the existing mission in a real active state; no parallel FSM. */
     app.runtime.mission.state = MS_OUTBOUND;
@@ -131,6 +132,7 @@ int main(void)
 
     /* Valid state + fresh explicit authorization produces a final velocity. */
     supplied_command.motion_authorization_request = 1u;
+    supplied_command.motion_authorization_sequence = 1u;
     step_app(&app, &cfg, 510u);
     CHECK(app.runtime.output.step_valid == 1u);
     CHECK(app.runtime.output.armed == 1u);
@@ -176,42 +178,51 @@ int main(void)
     CHECK(last_setpoint.motion_enabled == 0u);
     CHECK(last_host_authorization == 0u);
 
-    /* A low request arms the edge detector; only a later high grants motion. */
+    /* An automatic low/high cycle is not a new authorization decision. */
     supplied_command.motion_authorization_request = 0u;
     step_app(&app, &cfg, 540u);
     CHECK(last_setpoint.motion_enabled == 0u);
     supplied_command.motion_authorization_request = 1u;
     step_app(&app, &cfg, 550u);
+    CHECK(last_setpoint.motion_enabled == 0u);
+
+    /* A new explicit decision resumes the existing non-target waypoint task. */
+    supplied_command.motion_authorization_sequence = 2u;
+    step_app(&app, &cfg, 560u);
     CHECK(last_setpoint.motion_enabled == 1u);
     CHECK(vec3_norm(last_setpoint.velocity_sp) > 0.01f);
+    CHECK(app.runtime.mission.state == active_state);
 
-    /* Task-side cancellation revokes motion; restart requires a new edge. */
+    /* A deliberate cancellation also consumes a decision sequence. */
     supplied_command.motion_authorization_request = 0u;
-    step_app(&app, &cfg, 560u);
+    supplied_command.motion_authorization_sequence = 3u;
+    step_app(&app, &cfg, 570u);
     CHECK(last_setpoint.motion_enabled == 0u);
     CHECK(app.runtime.mission.state == active_state);
     supplied_command.motion_authorization_request = 1u;
-    step_app(&app, &cfg, 570u);
+    step_app(&app, &cfg, 580u);
+    CHECK(last_setpoint.motion_enabled == 0u);
+    supplied_command.motion_authorization_sequence = 4u;
+    step_app(&app, &cfg, 590u);
     CHECK(last_setpoint.motion_enabled == 1u);
 
-    /* In a same-cycle race, the state fault wins over the new request. */
+    /* In a same-cycle race, a fault consumes and rejects the new decision. */
     supplied_command.motion_authorization_request = 0u;
-    step_app(&app, &cfg, 580u);
+    supplied_command.motion_authorization_sequence = 5u;
+    step_app(&app, &cfg, 600u);
     state_available = 0u;
     supplied_command.motion_authorization_request = 1u;
-    step_app(&app, &cfg, 590u);
-    CHECK(last_setpoint.motion_enabled == 0u);
-    state_available = 1u;
-    step_app(&app, &cfg, 600u);
-    CHECK(last_setpoint.motion_enabled == 0u);
-    supplied_command.motion_authorization_request = 0u;
+    supplied_command.motion_authorization_sequence = 6u;
     step_app(&app, &cfg, 610u);
     CHECK(last_setpoint.motion_enabled == 0u);
-    supplied_command.motion_authorization_request = 1u;
+    state_available = 1u;
     step_app(&app, &cfg, 620u);
+    CHECK(last_setpoint.motion_enabled == 0u);
+    supplied_command.motion_authorization_sequence = 7u;
+    step_app(&app, &cfg, 630u);
     CHECK(last_setpoint.motion_enabled == 1u);
 
-    CHECK(fcu_write_count == 62u);
+    CHECK(fcu_write_count == 63u);
     CHECK(app.fcu_tx_drops == 0u);
     CHECK(app.fcu_command_rejections == 0u);
 
