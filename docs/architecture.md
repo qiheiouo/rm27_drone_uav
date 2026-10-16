@@ -1,8 +1,8 @@
 # 软件架构与平台无关化设计评审
 
-评审日期：2026-10-15
+评审日期：2026-10-16
 
-评审范围：当前 `main` 的 C99 源码、CMake 目标、主机仿真、STM32 候选适配、测试与相关技术文档。FlightState 与 FlightCommand 第一阶段已经实现并通过主机验证；TargetObservation 和真实通信仍保持设计或待确认状态。
+评审范围：以 `483c504` 为起点的隔离分支 C99 源码、CMake 目标、主机仿真、STM32 候选装配、PX4/MAVLink 可选适配、测试与相关技术文档。FlightState 与 FlightCommand 已通过主机验证；PX4 适配已完成 L1 离线协议和组合路径验证，但真实 PX4 SITL、HIL 和 TargetObservation 仍未完成。
 
 ## 1. 结论摘要
 
@@ -12,11 +12,11 @@
 
 1. `NavRuntimeInput` 的目标入口只有 `PixelObs`，核心在 `nav_runtime_step()` 内按目标尺寸重建三维位置；外部视觉若已经提供三维位置，没有正式直通入口。
 2. `FlightState` 现已作为最小外部融合状态契约进入 `NavApp` 与 `NavRuntime`；静态配置保证它与原有内部估计链互斥，外部状态不会再次进入惯性积分器。
-3. 当前只支持启动时选择来源，不支持自动切换；真实状态适配器、接收时间/时钟同步和可比较质量仍等待硬件与定位方案确认。
+3. 当前只支持启动时选择来源，不支持自动切换；PX4 适配器以本地接收时间判断新鲜度并保留 PX4 boot time，但跨机 TIMESYNC 和可比较质量仍未实现。
 4. `FcuSetpoint` 已扩展为统一 `FlightCommand`：最终命令显式选择 velocity/acceleration 与 yaw/yaw-rate，固定内部 local XY、Z-up 坐标，并由 `NavApp` 的单一授权门决定是否产生运动包。
-5. 仓库只有 `platform/host/` 与 `platform/stm32/`；ARM Linux 适配层尚不存在，不能把“可以新增”写成“已经支持”。
+5. `flight/px4_mavlink/` 提供与 OS 无关的 MAVLink 消息适配；`platform/host/px4_sitl_runner.c` 只提供 loopback UDP 生命周期。ARM Linux/MCU 真实传输层尚不存在，不能把 PC 入口写成已支持最终运算平台。
 
-下一阶段只应继续 TargetObservation 契约与直通入口；真实飞控能力、坐标转换、实际接受/执行反馈和 Failsafe 仍等待硬件选型，不应在核心中猜测。
+当前应先在真实 PX4 SITL 中验证低速闭环和失效行为；TargetObservation 仍需等待视觉组契约。主机适配代码不能代替飞控实际接受/执行反馈和 Failsafe 证据。
 
 ## 2. 当前构建与依赖边界
 
@@ -25,6 +25,8 @@
 - `nav_core`：核心、感知数学、飞控中立契约与多机算法；
 - `nav_sim`：动力学、传感器、场景和故障注入，只供主机使用；
 - `nav_stm32_port`：`platform/stm32/nav_tasks.c` 装配骨架；
+- `nav_px4_mavlink`：可选 C99 MAVLink 消息/坐标/时间适配，不含 socket 或串口；
+- `px4_sitl_runner`：可选 PC loopback UDP 运行入口，复用同一个 `NavApp` 授权门；
 - `mission_sim`、`swarm_sim`、`nav_replay`、`nav_telemetry_dump`、`fcu_bridge_sim`：主机程序；
 - 测试目标：当前 CTest 清单 84 项。
 
@@ -61,10 +63,24 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
 
 `NavMissionCommand.motion_authorization_request` 是任务/平台侧授权请求，`motion_authorization_sequence` 是明确授权/撤销决策的 16 位非零序号。`NavApp` 只有在本周期运行时有效、任务处于运动状态且收到新的授权决策序号时，才生成 `motion_enabled=1` 的最终包。定位、必需输入、命令数值或发送前置条件失效都会撤销授权并生成禁用包；恢复后旧序号无论请求保持高，还是由任务代码自动低→高，都不能恢复运动。`nav_fcu_set_motion_authorized()` 只报告主机最终授权状态，不表示飞控真实 armed 或已经执行。
 
-这是一个固定内存、非阻塞意图明确的骨架，但存在两个关键事实：
+这是一个固定内存、非阻塞意图明确的骨架。PX4 可选路径复用它，关键事实是：
 
-- 它按 `flight_state_source` 只读取内部 Flow 路径或外部 `FlightState` 路径；真实 `FcuBridge`/MAVLink 接收任务仍未实现；
-- 禁用包、零速度和停止发送在具体飞控上的效果尚未验证；当前实现只证明主机撤销了运动授权。
+- 它按 `flight_state_source` 只读取内部 Flow 路径或外部 `FlightState` 路径；PX4 消息只走外部状态路径，不进入内部惯性积分器；
+- PX4 运行器把禁用解释为停止发送运动 setpoint 并请求退出 Offboard；具体悬停、降落、停桨或 Failsafe 效果尚未通过 SITL/HIL 验证。
+
+### 3.3 可选 PX4 路径
+
+```text
+MAVLink HEARTBEAT / LOCAL_POSITION_NED / ATTITUDE_QUATERNION
+  → px4_mavlink_ingest
+  → FcuStateSnapshot → fcu_state_to_flight_state
+  → NavApp → NavRuntime(EXTERNAL)
+  → CtrlOutput → FcuMotionAuthorization → FcuSetpoint
+  → px4_mavlink_make_velocity_setpoint
+  → MAVLink SET_POSITION_TARGET_LOCAL_NED
+```
+
+`px4_mavlink_adapter.c` 不包含 socket、串口、线程或 PX4 SDK；`px4_sitl_runner.c` 拥有 PC UDP、周期和 CSV。运行器只接受 IPv4 loopback，并要求 `--sitl --authorize-motion --arm` 三个显式开关，因而不构成实体飞控运行入口。它连续预发送 setpoint 后请求 Offboard，等待 heartbeat 的 Offboard 反馈后才请求 arm；授权失效时不生成新决策序号。
 
 ### 3.3 核心输入处理
 
@@ -120,7 +136,7 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
 - `CtrlOutput`：当前内部位置控制器产生的完整速度命令、加速度与 yaw rate；
 - `FcuSetpoint`：序号、生成时间、有效字段、速度/加速度、yaw/yaw rate、有效期、显式控制模式、显式内部坐标系和 `motion_enabled`。
 
-结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一带决策序号的授权原语。真实飞控能力选择、实际控制模式反馈、接受/执行状态和过期动作仍等待适配器与硬件验证。
+结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一带决策序号的授权原语。PX4 适配器实现 velocity+yaw/yaw-rate 映射和 heartbeat/ACK 反馈；实际接受、轨迹执行与过期/Failsafe 动作仍等待 SITL/HIL 验证。
 
 ## 5. 三类接口契约
 
@@ -130,11 +146,12 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 |---|---|
 | FlightState 契约、来源互斥、失效与恢复 | `已实现并验证（主机）` |
 | `nav_flight_state_read()` 板级入口 | `已实现并由主机桩验证` |
-| 真实 FCU/VIO 状态适配器 | `等待硬件与定位选型` |
+| PX4 MAVLink 状态适配器 | `已实现并验证（主机离线消息/组合路径）` |
 | 自动定位源切换 | `设计预留，未实现` |
 | TargetObservation 直通 | `设计预留，未实现` |
 | FlightCommand 契约与主机授权门 | `Frozen / Sim-verified` |
-| 真实飞控接受/执行反馈与 Failsafe | `等待飞控选型与硬件验证` |
+| PX4 SITL 接受/执行反馈与 Failsafe | `适配入口已实现，真实 SITL 未验证` |
+| 实体飞控传输、接受/执行反馈与 Failsafe | `等待版本/端口/参数确认和 HIL/硬件验证` |
 
 ### 5.1 FlightState 语义
 
@@ -152,7 +169,7 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 
 `NavRuntimeConfig.flight_state_source` 只允许 `INTERNAL_ESTIMATOR` 或 `EXTERNAL`。内部模式保留原 IMU + Flow/Odom + ToF 估计链；外部模式要求 `FlightState`，拒绝同时提供 Flow/Odom，并直接写入核心 `NavState`。原始 IMU 仍为必需输入，但只用于碰撞检测等独立逻辑，不参与外部状态的二次融合。
 
-本轮未加入协方差、质量分数和逐包 `source_id`：现有导航计算不消费协方差；不同定位器的质量不可直接比较；活动来源由启动配置唯一确定。链路接收时间属于未来真实适配器/FcuBridge，不塞入融合状态样本。自动来源切换未设计，也未实现。
+本轮未加入协方差、质量分数和逐包 `source_id`：现有导航计算不消费协方差；不同定位器的质量不可直接比较；活动来源由启动配置唯一确定。PX4 适配器在内部同时保存来源 boot time 与本地接收时间，只有后者映射为 `FlightState.timestamp_ms` 参与超时；尚未实现 TIMESYNC。自动来源切换未设计，也未实现。
 
 ### 5.2 TargetObservation 语义
 
@@ -175,14 +192,14 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 
 ### 5.3 FlightCommand 语义
 
-状态：`Frozen / Sim-verified（主机命令生成与参考字节流）`。
+状态：`Frozen / Sim-verified（主机命令生成、参考字节流与 MAVLink 离线映射）`。
 
 | 字段/规则 | 已实现语义 |
 |---|---|
 | `velocity_sp` | `CtrlOutput.velocity_cmd` 经授权后的三维目标速度，m/s |
 | 主控制模式 | 最终运动包只能是 `VELOCITY` 或 `ACCELERATION`；`AUTO` 只能用于桥接能力选择，不能出现在已授权运动包中 |
 | 航向模式 | 最终运动包只能选择 `ANGLE` 或 `RATE`，对应有效位互斥；禁用包为 `NONE` |
-| `control_frame` | 当前只接受 `LOCAL_XY_Z_UP`；PX4 NED/FRD 转换只能在未来飞控适配层完成 |
+| `control_frame` | 当前只接受 `LOCAL_XY_Z_UP`；PX4 适配层显式转换为 NED/FRD，核心不做隐式转换 |
 | `source_timestamp_ms` | 主机生成时刻；接收端新鲜度使用本地接收时刻加 `validity_ms` 判断，避免假定两端时钟已同步 |
 | `motion_enabled` | 已通过主机最终授权门；不表示飞控 armed、接受或执行 |
 | 禁用包 | `motion_enabled=0`、`valid_mask=0`、1 ms 协议占位有效期；接收端先应用禁用，再判断普通运动命令 TTL；其真实飞控效果待验证 |
@@ -207,6 +224,8 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 
 `FlightState` 已冻结 body-to-nav 四元数方向与 WXYZ 顺序；具体适配器仍必须确认外部 X/Y 朝向、body 轴和原点，再转换到该内部契约。`FcuStateSnapshot` 或 MAVLink 数据未经这一步不得直接输入运行时。
 
+当前 SITL 固定映射是 `nav=(NED.y,NED.x,-NED.z)`，导航 +X 为东、+Y 为北、yaw=0 为东，导航 local origin 直接采用 PX4 EKF local origin；FRD 向量变为 FLU `(x,-y,-z)`。这只是明确的 SITL 配置，不是实机场地对齐结论。输出速度和 yaw/yaw-rate 使用逆变换，测试向量验证了轴和符号。
+
 ## 7. 数据与控制所有权
 
 | 数据/动作 | 唯一所有者 | 其他模块权限 |
@@ -217,7 +236,7 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 | 任务状态、规划和末端制导 | NavRuntime | 平台不得再并行运行另一套任务制导 |
 | 导航期望速度 | `NavRuntime` / `CtrlOutput.velocity_cmd` | 平台不得另算任务级速度 |
 | 最终主机运动授权与 `FcuSetpoint` | `NavApp::motion_authorization` | 适配器只能转换或更严格地禁用 |
-| 飞控接受/执行的运动 | 真实飞控 | 当前主机代码没有执行反馈，不得宣称已执行 |
+| 飞控接受/执行的运动 | PX4/真实飞控 | heartbeat/ACK 只给出模式、armed 与命令结果；当前没有实际轨迹证据，不得宣称已执行 |
 | 姿态、角速度、电机和实际 armed | 飞控 | 导航只能请求或读取状态 |
 | 人工紧急停桨 | 安全员与独立飞控链路 | 导航接收中止结果，不实现遥控逻辑 |
 
@@ -280,14 +299,14 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 保留现有主机仿真，并增加以下最小测试设计：
 
 1. FlightState 规范向量已经过 `NavRuntime` 与 STM32 `NavApp` 主机桩；未来 Linux 适配器必须复用同一向量。
-2. 覆盖 NED/FRD 到内部 z-up/FLU 的静止、倾斜、平移和 yaw 测试向量。
-3. 覆盖采样时间、接收时间、32 位回绕、过期、重复、倒序和来源重启。
+2. NED/FRD 到内部 z-up/FLU 的平移、yaw、角速度和 IMU 测试向量已覆盖；完整倾斜姿态仍应在 SITL 日志中交叉检查。
+3. PX4 接收时间、状态/命令过期、非有限值和来源 boot time 回退已覆盖；跨机 TIMESYNC 和真实进程重连待 SITL。
 4. 同一目标分别以 pixel 兼容路径和已知三维路径输入，验证不会重复重建；视觉组实际三维样本走回放测试。
 5. 同一周期两种主状态的拒绝已覆盖；两种目标输入互斥留待 TargetObservation 阶段。
 6. 已检查 `FcuSetpoint` 的速度/yaw 互斥模式、frame、有效期、非有限值、`motion_enabled`、序号和禁用包参考编解码。
-7. 已检查 FlightState 失效、同序号请求自动低→高、显式新序号重新授权、任务侧撤销/重启、同周期故障竞争、禁用包延迟处理和桥接链路重同步；真实飞控队列、进程重启和 Failsafe 仍需 HIL/台架。
+7. 已检查 FlightState 失效、同序号请求自动低→高、显式新序号重新授权、任务侧撤销/重启、同周期故障竞争、禁用包延迟处理、桥接链路重同步，以及完整 PX4 消息到 NavApp 再到 MAVLink 输出路径；真实队列、进程重连和 Failsafe 仍需 SITL/HIL。
 
-这些测试先在主机运行；只有真实协议和硬件确定后才增加 SIL/HIL。不能用适配器桩测试替代实物通信证据。
+这些测试当前只在主机离线运行；下一证据等级必须来自实际 PX4 SITL，再进入 HIL/台架。不能用适配器桩测试替代 SITL 或实物通信证据。
 
 ## 11. 十项评审问题逐项回答
 
@@ -297,11 +316,11 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 ### 2. 哪些模块直接依赖平台或通信？
 
-`platform/host/` 依赖主机命令行和文件 IO；`simulation/` 依赖主机模型；`platform/stm32/nav_tasks.c` 依赖 `nav_platform.h` 的板级函数集合。`RMFC` 编解码是参考协议实现但仍为平台中立；真实 UART/MAVLink 驱动尚不存在。`px4_bluetooth_validation.md` 是候选验证说明，不是已实现依赖。
+`platform/host/` 依赖主机命令行、文件 IO 和可选 UDP；`simulation/` 依赖主机模型；`platform/stm32/nav_tasks.c` 依赖 `nav_platform.h` 的板级函数集合。`flight/px4_mavlink/` 是真实 MAVLink common 消息适配，但没有真实 UART/USB/MCU 驱动；`RMFC` 仍是独立参考协议。`px4_bluetooth_validation.md` 是候选验证说明，不是已实现依赖。
 
 ### 3. 定位状态如何进入主链，缺口是什么？
 
-默认模式仍由必需 IMU、可选 Flow/Odom 和 ToF 进入 `estimator_update()`。外部模式由 `NavApp.nav_flight_state_read()` 填充 `NavRuntimeInput.flight_state`，经时间、数值、frame、四元数和有效位检查后直接形成 `NavState`，不调用估计器积分。缺口是尚无真实设备适配、时钟同步和硬件验证。
+默认模式仍由必需 IMU、可选 Flow/Odom 和 ToF 进入 `estimator_update()`。外部模式由 `NavApp.nav_flight_state_read()` 填充 `NavRuntimeInput.flight_state`，经时间、数值、frame、四元数和有效位检查后直接形成 `NavState`，不调用估计器积分。PX4 消息适配已经实现；缺口是没有实际 PX4 SITL/设备会话、跨机时钟同步和硬件验证。
 
 ### 4. 如何支持不同定位来源？
 
@@ -313,7 +332,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 ### 6. 如何设计统一速度控制输出？
 
-复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一、带明确决策序号的授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。过期与失联后的真实动作由飞控最终处理，当前只验证主机不继续授权。
+复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一、带明确决策序号的授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。PX4 适配已证明主机撤权后不再生成 MAVLink 运动目标；飞控收到失流/模式退出后的真实动作仍待 SITL/HIL。
 
 ### 7. STM32 与 ARM Linux 各需要什么？
 
@@ -329,7 +348,7 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 
 ### 10. 当前结构性迁移阻碍是什么？
 
-依严重性排序：目标只有像素正式入口；真实 FlightState 适配器尚不存在；FlightCommand 尚未与真实飞控能力、armed/接受/执行反馈和 Failsafe 闭合；外部设备时钟同步未实现；Linux 适配不存在；自动来源切换尚未设计。FlightState 与 FlightCommand 的主机契约、静态所有权和失效测试已完成。
+依严重性排序：目标只有像素正式入口；PX4 适配尚未在真实 SITL 中闭合，FlightCommand 尚未取得实际接受/轨迹/Failsafe 证据；外部设备时钟同步未实现；真实 Linux/MCU 传输不存在；自动来源切换尚未设计。FlightState、FlightCommand 和 MAVLink 映射的主机契约、静态所有权及失效测试已完成。
 
 ## 12. 改造分类
 
@@ -344,14 +363,14 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 ### 建议最小修改
 
 - 让规范化 `TargetObs` 正式进入 `NavRuntimeInput`，并与 `PixelObs` 互斥；
-- 硬件选型后把一个 FcuBridge/VIO 适配器接到已存在的 `nav_flight_state_read()`；
+- 在真实 PX4 SITL 中验证现有 MAVLink 适配接到 `nav_flight_state_read()` 的频率、年龄、重启和失联行为；
 - 将未来平台实现接到 `nav_fcu_set_motion_authorized`，不得把它映射成飞控真实 armed 反馈；
-- 让真实命令适配器消费飞控能力与活动状态，并提供接受/执行反馈；
-- 为真实适配器补充外部 frame 转换、采样/接收时间和接口一致性测试；
+- 用 heartbeat、ACK 和 PX4 日志验证现有命令适配器的接受与执行状态；
+- 用真实 SITL 日志补充完整倾斜姿态、采样/接收时间、频率和接口一致性验证；
 
 ### 硬件确定后才能开发
 
-- MAVLink/厂商协议和真实设备驱动；
+- 实体飞控 UART/USB/网络驱动和 MAVLink signing；
 - STM32 HAL/RTOS、ARM Linux 进程和外部 VIO SDK；
 - 时间同步、带宽、最坏延迟、控制模式和飞控失联配置；
 - 接近速度、接触参数和硬件资源预算。
@@ -366,11 +385,11 @@ STM32 负责固定内存缓存、DMA/中断、非阻塞驱动、周期和资源�
 
 ## 13. 验证边界
 
-当前 84 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、FlightState 直通/失效处理、FlightCommand 最终主机授权和组合逻辑。它们不能证明：
+默认 84 项 CTest 和主机场景可以证明代码在已建模输入下的确定性、FlightState 直通/失效处理、FlightCommand 最终主机授权和组合逻辑。启用 PX4 可选构建后增加 4 项，证明 MAVLink 字段/坐标/时间映射、NavApp 完整组合路径、运行器帮助和不安全启动拒绝；它们不能证明：
 
 - STM32 或 ARM Linux 的资源和实时性；
-- 任一真实 VIO、视觉模块或飞控兼容；
-- MAVLink、UART、无线链路或时钟同步已经可用；
+- 任一真实 VIO 或视觉模块兼容；
+- PX4 SITL/实体飞控已接受或执行、UART/无线链路或时钟同步已经可用；
 - 真实机体接近/撞击稳定；
 - 软件已经满足比赛部署条件。
 

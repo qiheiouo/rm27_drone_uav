@@ -5,6 +5,10 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(NAV_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+option(NAV_ENABLE_PX4_MAVLINK
+    "Build the optional PX4 MAVLink adapter and its host tests" OFF)
+set(MAVLINK_INCLUDE_DIR "" CACHE PATH
+    "Path to the official mavlink/c_library_v2 checkout")
 
 if(MSVC)
     add_compile_options(/W4)
@@ -109,6 +113,28 @@ add_library(nav_stm32_port STATIC platform/stm32/nav_tasks.c)
 target_include_directories(nav_stm32_port PUBLIC platform/stm32)
 target_link_libraries(nav_stm32_port PUBLIC nav_core)
 
+if(NAV_ENABLE_PX4_MAVLINK)
+    if(NOT EXISTS "${MAVLINK_INCLUDE_DIR}/common/mavlink.h")
+        message(FATAL_ERROR
+            "NAV_ENABLE_PX4_MAVLINK requires MAVLINK_INCLUDE_DIR to point "
+            "to an official mavlink/c_library_v2 checkout")
+    endif()
+    add_library(nav_px4_mavlink STATIC
+        flight/px4_mavlink/px4_mavlink_adapter.c)
+    target_include_directories(nav_px4_mavlink PUBLIC
+        flight/px4_mavlink)
+    target_include_directories(nav_px4_mavlink SYSTEM PUBLIC
+        "${MAVLINK_INCLUDE_DIR}")
+    target_link_libraries(nav_px4_mavlink PUBLIC nav_core)
+
+    add_executable(px4_sitl_runner platform/host/px4_sitl_runner.c)
+    target_link_libraries(px4_sitl_runner PRIVATE
+        nav_stm32_port nav_px4_mavlink nav_core)
+    if(WIN32)
+        target_link_libraries(px4_sitl_runner PRIVATE ws2_32)
+    endif()
+endif()
+
 enable_testing()
 
 foreach(t
@@ -151,6 +177,25 @@ add_test(NAME test_nav_app_flight_state COMMAND test_nav_app_flight_state)
 add_executable(test_nav_app_flight_command tests/test_nav_app_flight_command.c)
 target_link_libraries(test_nav_app_flight_command PRIVATE nav_stm32_port nav_core)
 add_test(NAME test_nav_app_flight_command COMMAND test_nav_app_flight_command)
+
+if(NAV_ENABLE_PX4_MAVLINK)
+    add_executable(test_px4_mavlink_adapter
+        tests/test_px4_mavlink_adapter.c)
+    target_link_libraries(test_px4_mavlink_adapter PRIVATE nav_px4_mavlink)
+    add_test(NAME test_px4_mavlink_adapter COMMAND test_px4_mavlink_adapter)
+
+    add_executable(test_px4_nav_app_path tests/test_px4_nav_app_path.c)
+    target_link_libraries(test_px4_nav_app_path PRIVATE
+        nav_stm32_port nav_px4_mavlink nav_core)
+    add_test(NAME test_px4_nav_app_path COMMAND test_px4_nav_app_path)
+
+    add_test(NAME px4_sitl_runner_help COMMAND px4_sitl_runner --help)
+    set_tests_properties(px4_sitl_runner_help PROPERTIES
+        PASS_REGULAR_EXPRESSION "Loopback only")
+    add_test(NAME px4_sitl_runner_refuses_unsafe COMMAND px4_sitl_runner)
+    set_tests_properties(px4_sitl_runner_refuses_unsafe PROPERTIES
+        WILL_FAIL TRUE)
+endif()
 
 foreach(scenario
     nominal

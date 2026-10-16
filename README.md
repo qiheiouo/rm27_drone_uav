@@ -1,6 +1,6 @@
 # RM_Drone_Nav
 
-面向 RoboMaster 2027 空中机器人的任务级自主导航项目。当前仓库提供可在主机回归的 C99 算法核心、仿真与测试入口，以及 STM32 候选适配骨架；它不是已经完成实机飞行验证的固件，也不绑定最终上层计算平台、定位模块或飞控协议。
+面向 RoboMaster 2027 空中机器人的任务级自主导航项目。当前仓库提供可在主机回归的 C99 算法核心、仿真与测试入口、STM32 候选适配骨架，以及可选的 PX4/MAVLink PC 适配；它不是已经完成 PX4 SITL 或实机飞行验证的固件，也不绑定最终上层计算平台或定位模块。
 
 > 当前开发顺序：先文档与接口契约，再做最小适配实现，最后进入硬件和飞行验证。主机编译、单元测试或仿真成功均不等价于实机可用。
 
@@ -35,10 +35,12 @@
 - 主机闭环、故障注入、回放、遥测和 84 项 CTest 清单：`Implemented / Sim-verified`；
 - `FlightState` 最小契约、静态单一来源选择、外部状态直通与失效恢复：`Implemented / Sim-verified`；
 - `FlightCommand` 最小契约、单一最终主机授权、失效撤销与显式重授权：`Implemented / Sim-verified`；
+- PX4/MAVLink C99 状态/速度适配和 loopback-only PC 入口：`Implemented / Sim-verified（离线协议与组合路径）`；
+- PX4 SITL 起飞、悬停、航点、失联和重新授权闭环：`Modify / 未验证`（本机未安装可用 PX4 SITL 环境）；
 - STM32 `NavApp` 和板级函数：`Implemented` 的候选骨架，未做目标板与实机验证；
 - ARM Linux（例如 RK3566）上层平台：`待确认`，仓库尚无对应适配层；
 - 外部 VIO（例如 MicoAir MicoVIO）：`待确认`，不是导航核心必需依赖；
-- PX4/MAVLink：重点候选和验证参考，尚无真实协议驱动；
+- PX4 飞控：已选；MicoAir743v2-AIO-35A 型号已核对，实际固件版本、端口、参数和实机行为仍待读取与验证；
 - 外部视觉输出维度、坐标系、时间戳、速率和速度字段：`待确认`。
 
 ## 已实现的软件资产
@@ -51,7 +53,7 @@
 | 任务与制导 | 19 个任务状态、目标丢失处理、末端制导、返航、停靠和紧急降落 |
 | 撞击处理 | 撞击检测、视觉保持、姿态恢复、速度阻尼、估计器检查和脱离；属于保留资产，不代表已经完成真实撞击验证 |
 | 轨迹与安全 | 固定容量轨迹、限速限加速度、围栏、输入时效、watchdog、控制饱和和碰撞风险处理 |
-| FCU 契约 | `FcuStateSnapshot`、唯一 `FcuSetpoint`/FlightCommand、显式控制与航向模式、local z-up、带决策序号的授权、参考字节流和断线回归；尚未接入具体飞控 |
+| FCU 契约 | `FcuStateSnapshot`、唯一 `FcuSetpoint`/FlightCommand、显式控制与航向模式、local z-up、带决策序号的授权；可选 PX4/MAVLink 映射已通过主机离线测试，尚未完成真实 SITL/HIL |
 | 多机扩展 | 可关闭的邻机状态、未来冲突和失联保护；不属于当前最优先主线 |
 | 诊断与复现 | 固定内存事件环、二进制遥测、CSV 回放和确定性故障注入 |
 
@@ -61,9 +63,9 @@
 
 三个重要接口处于不同成熟度：
 
-- 飞行状态：第一阶段 `FlightState` 契约已冻结为局部右手 z-up、SI 单位、body-to-nav WXYZ 四元数和导航本地单调毫秒时间；`NavRuntimeConfig.flight_state_source` 在启动时互斥选择原有内部估计链或外部融合状态。真实定位适配、时钟同步和硬件验证仍待选型。
+- 飞行状态：第一阶段 `FlightState` 契约已冻结为局部右手 z-up、SI 单位、body-to-nav WXYZ 四元数和导航本地单调毫秒时间；`NavRuntimeConfig.flight_state_source` 在启动时互斥选择原有内部估计链或外部融合状态。PX4 适配器已把 NED/FRD 状态归一化后接入外部路径，真实 SITL、时钟同步和硬件验证仍未完成。
 - 目标观测：`TargetObs` 已接近三维相对目标接口，但 `NavRuntimeInput` 目前只正式接收 `PixelObs` 并在核心内重建三维位置；外部视觉已提供三维结果时会缺少无重复重建的入口。
-- 飞行指令：`FcuSetpoint` 已是统一 `FlightCommand`。`CtrlOutput.velocity_cmd` 是导航期望速度，`NavApp` 是正式链路的最终主机授权所有者；velocity/acceleration 与 yaw/yaw-rate 分别互斥，内部 frame 固定为 local XY、Z-up，定位恢复后必须收到新的非零授权决策序号才能重新发送运动包，单纯请求低→高不能代替新决策。真实飞控能力、NED/FRD 转换、armed/接受/执行反馈和 Failsafe 仍待适配与硬件验证。
+- 飞行指令：`FcuSetpoint` 已是统一 `FlightCommand`。`CtrlOutput.velocity_cmd` 是导航期望速度，`NavApp` 是正式链路的最终主机授权所有者；velocity/acceleration 与 yaw/yaw-rate 分别互斥，内部 frame 固定为 local XY、Z-up，定位恢复后必须收到新的非零授权决策序号才能重新发送运动包。PX4 适配器只在授权后生成 `SET_POSITION_TARGET_LOCAL_NED`，并分别读取 heartbeat/ACK；主机发送、PX4 接受模式、armed 与实际执行仍是四种不同状态，真实 Failsafe 待 SITL/HIL 验证。
 
 详细证据、数据所有权和最小改造清单见[软件架构与平台无关化评审](docs/architecture.md)。
 
@@ -102,6 +104,8 @@ cmake -DQUALITY_BUILD_DIR=build -DQUALITY_CONFIG=Debug -P cmake/quality_gate.cma
 
 当前 CTest 清单为 84 项，覆盖模块、运行时输入健康、FlightState 外部直通与恢复、FlightCommand 授权/过期/非法值/故障竞争、故障注入、回放与遥测、FCU 参考桥、STM32 装配桩、多机网络和随机场景。这个数字只描述当前测试清单；测试通过只能支持 `Sim-verified`，不能支持“已在硬件验证”或“正式可部署”。
 
+PX4/MAVLink 为可选构建，不改变上述默认 84 项。启用后额外增加适配器、NavApp 组合路径、运行器帮助和不安全启动拒绝 4 项测试。依赖、构建命令、固定 SITL 坐标映射和安全边界见 [PX4 SITL 最小闭环适配与验证手册](docs/px4_sitl.md)。
+
 ## 目录边界
 
 ```text
@@ -122,7 +126,7 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。任何真�
 
 - STM32：保留 `platform/stm32/`，用于评估固定内存、确定性周期和板级驱动；它不是已选定的唯一上层平台。
 - ARM Linux：若最终选用 RK3566 或其他开发板，应新增 `platform/linux/` 或独立进程适配，负责设备、通信、时间和进程生命周期；算法核心继续以 C99 库形式复用。
-- 飞控：PX4/MAVLink 可优先验证，但 `RMFC` 仅是内部参考字节流，不是 MAVLink，也不证明任何真实飞控已兼容。
+- 飞控：PX4/MAVLink 已有可选的 C99 协议适配和 PC loopback SITL 入口；`RMFC` 仍只是内部参考字节流。离线消息测试不证明 PX4 SITL 或实体飞控已兼容。
 - 定位：飞控融合、外部 VIO 或其他来源都必须先经唯一状态提供者选择和归一化；不得让两套定位结果同时成为主导航状态。
 
 ## 文档索引
@@ -131,6 +135,7 @@ CMake 将 `nav_core`、`nav_sim` 和 `nav_stm32_port` 分开构建。任何真�
 - [开发流程与工程规范](docs/development_workflow.md)
 - [软件架构与平台无关化评审](docs/architecture.md)
 - [双端飞控链路参考设计](docs/fcu_uart_bridge.md)
+- [PX4 SITL 最小闭环适配与验证手册](docs/px4_sitl.md)
 - [PX4 蓝牙候选验证手册](docs/px4_bluetooth_validation.md)
 - [系统工作原理与讲解指南](docs/system_overview_and_presentation_guide.md)
 - [持续集成质量门禁](docs/quality_gate.md)

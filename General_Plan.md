@@ -1,6 +1,6 @@
 # RM_Drone_Nav 总体计划
 
-更新日期：2026-10-15
+更新日期：2026-10-16
 
 本文是当前任务范围、候选架构和后续开发阶段的权威计划。历史 Plan A/B/C、集群、撞击恢复和停靠研究已经形成源码与验证资产，但不再用来暗示硬件已选定、视觉识别由本项目负责，或仿真已经证明实机可用。
 
@@ -63,7 +63,7 @@
 | FlightState 最小输入契约 | `Frozen / Sim-verified` | 已实现外部融合状态直通、静态单一来源、超时/无效拒绝和恢复；未接真实定位设备 |
 | FlightCommand 最小输出契约 | `Frozen / Sim-verified` | `FcuSetpoint` 为唯一结构；显式速度/加速度、yaw/yaw-rate、local z-up、时效和带决策序号的重授权；未接真实飞控 |
 | MicoAir MicoVIO | `待确认` | 只是外部 VIO 候选，不进入核心依赖 |
-| 飞控与上层协议 | `待确认` | PX4/MAVLink 是重点候选；现有 `RMFC` 是参考编码，不是真实驱动 |
+| 飞控与上层协议 | `PX4 已选 / Modify` | MicoAir743v2-AIO-35A + PX4；MAVLink C99 适配已通过主机离线协议测试，真实固件版本、SITL 闭环和硬件参数未验证；`RMFC` 仍只是参考编码 |
 | 外部视觉数据契约 | `Draft` | 需要视觉组确认二维/三维、坐标系、时间戳、速率、置信度和速度字段 |
 | 内部导航坐标建议 | `Draft` | 右手、局部 z-up、SI 单位、单调毫秒时间；适配层负责外部坐标转换 |
 | 飞控最终拥有姿态与电机控制 | `Frozen` | 导航只提交运动目标；飞控保留限幅、解锁、失联和急停权限 |
@@ -91,22 +91,23 @@
 - `CtrlOutput.velocity_cmd` 表示导航期望速度，`NavApp` 通过唯一 `FcuMotionAuthorization` 门后才形成已授权命令；
 - 定位/必需输入失效会清零旧期望、重置目标相关状态并撤销授权，定位恢复不会自动恢复运动；任务/平台侧必须递增非零授权决策序号作出新的明确授权，布尔请求自动低→高不能重新授权；
 - 命令过期、NaN/Inf、模式不匹配、任务侧撤销/重启和同周期故障竞争已有主机测试；原 SIL 计算与动力学链保持兼容。
+- PX4 MAVLink common 状态/速度适配、NED/FRD 转换、heartbeat/ACK 反馈和 loopback PC 入口已实现，并通过官方生成头文件的离线协议与 NavApp 组合路径测试；未运行真实 PX4 SITL。
 
 后续仍需：
 
 1. 为外部三维目标观测增加不经过 `camera_reconstruct_nav` 的正式输入路径，并保留 `PixelObs` 兼容路径。
-2. 硬件选型后把一个真实状态适配器接到 `nav_flight_state_read()`；自动来源切换仍未设计，不得自行增加。
-3. 将 `FcuStateSnapshot` 的接收、过期和能力判断接入所选平台；融合状态优先使用 `fcu_state_to_flight_state()`，不要再送入惯性积分器。
-4. 硬件选型后把已冻结的 `FcuSetpoint` 映射到一种真实飞控协议，并验证能力、接受/执行反馈和 Failsafe；不得把主机命令生成描述为飞控已经执行。
+2. 在真实 PX4 SITL 中验证现有状态适配器接到 `nav_flight_state_read()` 的频率、超时、估计健康、重启与断线行为；自动来源切换仍未设计，不得自行增加。
+3. 目标平台确定后实现 UDP 之外的真实传输和时钟同步；融合状态继续经 `fcu_state_to_flight_state()` 进入外部路径，不再送入惯性积分器。
+4. 已把 `FcuSetpoint` 最小映射到真实 MAVLink common 消息，并分别暴露 heartbeat 模式/armed 与命令 ACK；当前只通过官方生成头文件的离线协议和 NavApp 组合路径测试，不得描述为 PX4 已接受或执行。
 5. 为未来 ARM Linux 和真实平台适配器复用现有 FlightState/FlightCommand 主机契约向量。
 
-### 4.3 硬件确定后才能开发
+### 4.3 仍需实际环境后才能开发或验证
 
-- 真实 MAVLink、厂商协议或自定义串口驱动；
+- PX4 SITL 飞行闭环、真实串口/USB 传输与 TIMESYNC；
 - UART/CAN/以太网/USB 的电气、DMA、缓存和线程实现；
 - 目标板资源、调度周期、最坏延迟和时钟同步；
 - 外部 VIO SDK、设备驱动和进程守护；
-- Offboard/Guided 控制模式、解锁与失联动作。
+- Offboard 模式接受、解锁与失联动作的真实 PX4 行为。
 
 ### 4.4 需要外部确认
 
@@ -200,11 +201,13 @@ RK3566 等 ARM Linux 板适合复杂通信、外部 VIO SDK、日志和多进程
 
 ### Phase 4：飞控协议与 SIL/HIL
 
+状态：`Modify`。PX4/MAVLink 最小适配、PC loopback 入口和离线组合路径已经实现；当前 Windows 主机没有 WSL Linux 发行版、Docker 或 PX4-Autopilot，尚未运行真实 PX4 SITL，HIL/实机也未开始。
+
 目标：把 `FcuSetpoint` 映射到选定飞控，并把真实飞控状态映射回统一状态。
 
 修改范围：选定平台的协议适配器和硬件在环夹具；不修改核心算法语义。
 
-必要测试：协议编解码、时钟、带宽、能力协商、断线、重启、指令过期、SIL/HIL 和无桨台架。
+必要测试：协议编解码、时钟、带宽、能力协商、断线、重启、指令过期、SIL/HIL 和无桨台架。当前已完成前述项目中的离线编解码、坐标/时间转换、命令过期、状态重启及授权恢复门；其余不降级为 Mock 验收。
 
 通过条件：飞控在命令过期、上层断线和急停时执行已确认安全动作；坐标和航向映射有实测证据。
 
@@ -236,10 +239,10 @@ RK3566 等 ARM Linux 板适合复杂通信、外部 VIO SDK、日志和多进程
 
 优先级从高到低：
 
-1. 与视觉组冻结最小 TargetObservation 契约并取得可重放样本；至少确认二维/三维类型、frame、时间、有效性和丢失语义。
-2. 在上述契约确定后增加与 `PixelObs` 互斥的直通入口，证明不会重复三维重建。
-3. 为 TargetObservation 补齐纯主机契约测试；FlightState 与 FlightCommand 已有对应测试。
-4. 硬件选型后再实现一个真实飞控/平台适配器，先只读状态和无运动验证，再验证命令接受、超时和失联行为。
+1. 在隔离的 PX4 SITL 环境运行 `px4_sitl_runner`，先确认只读状态和坐标，再按低速起飞、悬停、1 m 航点、退出 Offboard、失联与显式重授权顺序保存日志。
+2. 固定 PX4 版本、SITL vehicle、`COM_OF_LOSS_T`、`COM_OBL_RC_ACT` 等关键参数；模式或 arm 被拒绝时保存 ACK/heartbeat/ulog，不修改测试期望掩盖问题。
+3. 与视觉组冻结最小 TargetObservation 契约并取得可重放样本；至少确认二维/三维类型、frame、时间、有效性和丢失语义，且能对齐 PX4 适配使用的同一导航 local frame。
+4. 在上述契约确定后增加与 `PixelObs` 互斥的直通入口，证明不会重复三维重建；固定目标真值只作 SITL 配置，不冒充视觉协议。
 
 ## 8. 历史研究的处理
 
