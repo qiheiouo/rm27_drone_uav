@@ -34,6 +34,9 @@ enum {
  * quaternion rotating body-frame vectors into the navigation frame.
  * timestamp_ms is the sample time on NavRuntime's monotonic millisecond clock.
  * valid == 0 reports localization loss even if the last fields are present.
+ * armed and external_control_active are feedback from the flight controller,
+ * not host command or authorization state. They are consumed only when
+ * control_feedback_valid is set.
  */
 typedef struct {
     Vec3f position_m;
@@ -42,6 +45,9 @@ typedef struct {
     uint32_t timestamp_ms;
     uint32_t valid_mask;
     FlightStateFrame frame;
+    uint8_t armed;
+    uint8_t external_control_active;
+    uint8_t control_feedback_valid;
     uint8_t valid;
 } FlightState;
 

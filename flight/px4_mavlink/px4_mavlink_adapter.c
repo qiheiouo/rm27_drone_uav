@@ -3,8 +3,9 @@
 #include <math.h>
 #include <string.h>
 
-#define PX4_CUSTOM_MAIN_MODE_POSCTL   3u
-#define PX4_CUSTOM_MAIN_MODE_OFFBOARD 6u
+#define PX4_CUSTOM_MAIN_MODE_AUTO       4u
+#define PX4_CUSTOM_MAIN_MODE_OFFBOARD   6u
+#define PX4_CUSTOM_SUB_MODE_AUTO_LOITER 3u
 
 static uint8_t finite_quaternion(Quatf q)
 {
@@ -21,6 +22,15 @@ static uint8_t system_status_allows_state(uint8_t status)
 {
     return (status == MAV_STATE_STANDBY || status == MAV_STATE_ACTIVE)
         ? 1u : 0u;
+}
+
+static uint8_t system_status_allows_valid_estimator(uint8_t status)
+{
+    /* PX4 v1.17 reports MAV_STATE_UNINIT while disarmed whenever one of its
+     * preflight checks is not passing. A fresh ESTIMATOR_STATUS message is
+     * the authoritative source for estimator health in that case. */
+    return (status == MAV_STATE_UNINIT ||
+            system_status_allows_state(status)) ? 1u : 0u;
 }
 
 static uint8_t estimator_flags_allow_state(uint32_t flags)
@@ -90,6 +100,7 @@ static uint8_t target_available(const Px4MavlinkAdapter *adapter)
 
 static uint8_t make_mode_request(const Px4MavlinkAdapter *adapter,
                                  uint8_t main_mode,
+                                 uint8_t sub_mode,
                                  mavlink_message_t *message)
 {
     if (!target_available(adapter) || message == 0) return 0u;
@@ -103,7 +114,8 @@ static uint8_t make_mode_request(const Px4MavlinkAdapter *adapter,
         0u,
         (float)MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
         (float)main_mode,
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        (float)sub_mode,
+        0.0f, 0.0f, 0.0f, 0.0f);
     return 1u;
 }
 
@@ -215,9 +227,10 @@ Px4MavlinkIngestResult px4_mavlink_ingest(
             adapter->cfg.ned_to_nav, ned_position);
         adapter->state.local_velocity = quat_rotate(
             adapter->cfg.ned_to_nav, ned_velocity);
-        adapter->state.height_m = adapter->state.local_position.z;
+        /* Local Z is relative to the EKF origin and may be negative even on
+         * the ground. It is not a non-negative AGL height measurement. */
         adapter->state.valid_mask |= FCU_STATE_VALID_LOCAL_POSITION |
-            FCU_STATE_VALID_LOCAL_VELOCITY | FCU_STATE_VALID_HEIGHT;
+            FCU_STATE_VALID_LOCAL_VELOCITY;
         adapter->position_received_ms = received_at_ms;
         adapter->position_seen = 1u;
         return PX4_MAVLINK_ACCEPTED;
@@ -316,7 +329,12 @@ uint8_t px4_mavlink_get_flight_state(Px4MavlinkAdapter *adapter,
             return 0u;
         }
         estimator_valid = estimator_flags_allow_state(
-            adapter->estimator_flags);
+            adapter->estimator_flags) &&
+            system_status_allows_valid_estimator(
+                adapter->feedback.system_status);
+    } else {
+        estimator_valid = system_status_allows_state(
+            adapter->feedback.system_status);
     }
     adapter->state.sequence = adapter->state_sequence++;
     adapter->state.capabilities = FCU_CAP_VELOCITY_SETPOINT |
@@ -325,8 +343,7 @@ uint8_t px4_mavlink_get_flight_state(Px4MavlinkAdapter *adapter,
     adapter->state.armed = adapter->feedback.armed;
     adapter->state.external_control_active =
         adapter->feedback.offboard_active;
-    adapter->state.estimator_healthy = estimator_valid &&
-        system_status_allows_state(adapter->feedback.system_status);
+    adapter->state.estimator_healthy = estimator_valid;
     if (!fcu_state_to_flight_state(&adapter->state, sample_received_ms,
                                    flight_state)) {
         return 0u;
@@ -485,14 +502,16 @@ uint8_t px4_mavlink_make_message_interval_request(
 uint8_t px4_mavlink_make_offboard_request(const Px4MavlinkAdapter *adapter,
                                           mavlink_message_t *message)
 {
-    return make_mode_request(adapter, PX4_CUSTOM_MAIN_MODE_OFFBOARD, message);
+    return make_mode_request(
+        adapter, PX4_CUSTOM_MAIN_MODE_OFFBOARD, 0u, message);
 }
 
-uint8_t px4_mavlink_make_position_hold_request(
+uint8_t px4_mavlink_make_hold_request(
     const Px4MavlinkAdapter *adapter,
     mavlink_message_t *message)
 {
-    return make_mode_request(adapter, PX4_CUSTOM_MAIN_MODE_POSCTL, message);
+    return make_mode_request(adapter, PX4_CUSTOM_MAIN_MODE_AUTO,
+                             PX4_CUSTOM_SUB_MODE_AUTO_LOITER, message);
 }
 
 uint8_t px4_mavlink_make_arm_request(const Px4MavlinkAdapter *adapter,

@@ -88,6 +88,9 @@ static uint8_t flight_state_contract_valid(const FlightState *state)
     return (state->valid == 1u &&
             state->frame == FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP &&
             state->valid_mask == FLIGHT_STATE_REQUIRED_MASK &&
+            state->armed <= 1u &&
+            state->external_control_active <= 1u &&
+            state->control_feedback_valid <= 1u &&
             norm_squared >= 0.81f && norm_squared <= 1.21f) ? 1u : 0u;
 }
 
@@ -1113,6 +1116,15 @@ uint8_t nav_runtime_step(NavRuntime *runtime, const NavRuntimeInput *input)
     safety_input.trajectory_valid = runtime->trajectory_valid;
     safety_input.controller_saturated = controller_saturated(
         &runtime->previous_control, &cfg->ctrl);
+    if (cfg->flight_state_source == NAV_FLIGHT_STATE_EXTERNAL &&
+        input->flight_state != 0 &&
+        input->flight_state->control_feedback_valid &&
+        (!input->flight_state->armed ||
+         !input->flight_state->external_control_active)) {
+        /* Prestreaming setpoints before PX4 is armed is required for
+         * Offboard entry, but no actuator response is possible yet. */
+        safety_input.controller_saturated = 0u;
+    }
     safety_input.swarm_link_guard_active = swarm_link_guard_output.active;
     safety_input.dt = dt;
     safety_decision = safety_update_full(&runtime->safety, &safety_input);

@@ -141,7 +141,7 @@ WAITING → ACTIVE → STALE
 `FcuMotionAuthorization`。
 
 PX4 没有接收 `RMFC` 禁用包。当前 PC 参考行为是：禁用或过期时不发送运动 setpoint，并在曾经
-授权后请求切回 POSCTL；链路中断时则无法保证该请求送达，最终动作由 PX4 Offboard-loss 参数决定。
+授权后请求切换到 PX4 Hold（AUTO_LOITER）；链路中断时则无法保证该请求送达，最终动作由 PX4 Offboard-loss 参数决定。
 所以 `motion_enabled=0`、停止发送、模式退出 ACK、heartbeat 已退出 Offboard 和实际飞行器动作是
 不同证据。详细消息、坐标、时间、依赖版本、运行命令和未验证事项见 [PX4 SITL 最小闭环适配与验证手册](px4_sitl.md)。
 

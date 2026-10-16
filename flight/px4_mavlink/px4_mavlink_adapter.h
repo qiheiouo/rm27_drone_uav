@@ -110,7 +110,7 @@ uint8_t px4_mavlink_make_message_interval_request(
     mavlink_message_t *message);
 uint8_t px4_mavlink_make_offboard_request(const Px4MavlinkAdapter *adapter,
                                           mavlink_message_t *message);
-uint8_t px4_mavlink_make_position_hold_request(
+uint8_t px4_mavlink_make_hold_request(
     const Px4MavlinkAdapter *adapter,
     mavlink_message_t *message);
 uint8_t px4_mavlink_make_arm_request(const Px4MavlinkAdapter *adapter,

@@ -203,6 +203,9 @@ int main(void)
     CHECK(flight_state.timestamp_ms == 510u);
     CHECK(flight_state.valid_mask == FLIGHT_STATE_REQUIRED_MASK);
     CHECK(flight_state.frame == FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP);
+    CHECK(flight_state.armed == 1u);
+    CHECK(flight_state.external_control_active == 1u);
+    CHECK(flight_state.control_feedback_valid == 1u);
     CHECK(flight_state.valid == 1u);
     CHECK(nearf(flight_state.position_m.y, 2.0f));
 

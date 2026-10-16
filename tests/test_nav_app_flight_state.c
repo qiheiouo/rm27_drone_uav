@@ -26,6 +26,9 @@ static FlightState make_state(uint32_t timestamp_ms, float x)
     state.timestamp_ms = timestamp_ms;
     state.valid_mask = FLIGHT_STATE_REQUIRED_MASK;
     state.frame = FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP;
+    state.armed = 1u;
+    state.external_control_active = 1u;
+    state.control_feedback_valid = 1u;
     state.valid = 1u;
     return state;
 }

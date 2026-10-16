@@ -66,7 +66,7 @@ nav_time_ms + nav_imu_read + (nav_flow_read 或 nav_flight_state_read)
 这是一个固定内存、非阻塞意图明确的骨架。PX4 可选路径复用它，关键事实是：
 
 - 它按 `flight_state_source` 只读取内部 Flow 路径或外部 `FlightState` 路径；PX4 消息只走外部状态路径，不进入内部惯性积分器；
-- PX4 运行器把禁用解释为停止发送运动 setpoint 并请求退出 Offboard；具体悬停、降落、停桨或 Failsafe 效果尚未通过 SITL/HIL 验证。
+- PX4 运行器把禁用解释为停止发送运动 setpoint 并请求退出 Offboard 到 Hold（AUTO_LOITER）。PX4 v1.17 `gz_x500` 已实测空中撤权后保持 armed、进入 Hold 且无 failsafe；HIL/实体机仍未验证。
 
 ### 3.3 可选 PX4 路径
 
@@ -80,7 +80,7 @@ MAVLink HEARTBEAT / LOCAL_POSITION_NED / ATTITUDE_QUATERNION
   → MAVLink SET_POSITION_TARGET_LOCAL_NED
 ```
 
-`px4_mavlink_adapter.c` 不包含 socket、串口、线程或 PX4 SDK；`px4_sitl_runner.c` 拥有 PC UDP、周期和 CSV。运行器只接受 IPv4 loopback，并要求 `--sitl --authorize-motion --arm` 三个显式开关，因而不构成实体飞控运行入口。它连续预发送 setpoint 后请求 Offboard，等待 heartbeat 的 Offboard 反馈后才请求 arm；授权失效时不生成新决策序号。
+`px4_mavlink_adapter.c` 不包含 socket、串口、线程或 PX4 SDK；`px4_sitl_runner.c` 拥有 PC UDP、周期和 CSV。运行器只接受 IPv4 loopback，并要求 `--sitl --authorize-motion --arm` 三个显式开关，因而不构成实体飞控运行入口。它连续预发送 setpoint 后请求 Offboard，等待 heartbeat 的 Offboard 反馈后才请求 arm；授权失效时不生成新决策序号。`FlightState.armed` 与 `external_control_active` 是飞控反馈，仅在 `control_feedback_valid=1` 时用于防止 Offboard 预流阶段被误判为执行器持续饱和；它们不能代替主机的最终运动授权，旧外部状态生产者不提供反馈时仍保留原饱和保护。
 
 ### 3.3 核心输入处理
 

@@ -569,6 +569,9 @@ uint8_t fcu_state_to_flight_state(const FcuStateSnapshot *state,
     flight_state->timestamp_ms = local_timestamp_ms;
     flight_state->valid_mask = FLIGHT_STATE_REQUIRED_MASK;
     flight_state->frame = FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP;
+    flight_state->armed = state->armed;
+    flight_state->external_control_active = state->external_control_active;
+    flight_state->control_feedback_valid = 1u;
     flight_state->valid = state->estimator_healthy;
     return 1u;
 }

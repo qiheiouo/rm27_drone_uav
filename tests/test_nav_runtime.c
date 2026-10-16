@@ -41,6 +41,9 @@ static FlightState make_flight_state(uint32_t timestamp_ms)
     state.timestamp_ms = timestamp_ms;
     state.valid_mask = FLIGHT_STATE_REQUIRED_MASK;
     state.frame = FLIGHT_STATE_FRAME_LOCAL_XY_Z_UP;
+    state.armed = 1u;
+    state.external_control_active = 1u;
+    state.control_feedback_valid = 1u;
     state.valid = 1u;
     return state;
 }
@@ -175,6 +178,58 @@ int main(void)
     CHECK(fabsf(runtime.output.nav.pos.x - 1.0f) < 1e-5f);
     CHECK(fabsf(runtime.output.nav.vel.y + 0.2f) < 1e-5f);
     CHECK(fabsf(runtime.output.nav.yaw - 0.4f) < 1e-5f);
+
+    /* Offboard prestream before the FCU is armed cannot be treated as a
+     * controller response failure. The same sustained saturation still
+     * triggers the original safety timeout once actuation is confirmed. */
+    nav_runtime_config_default(&cfg);
+    cfg.flight_state_source = NAV_FLIGHT_STATE_EXTERNAL;
+    cfg.safety.controller_saturation_timeout_s = 0.025f;
+    CHECK(nav_runtime_init(&runtime, &cfg) == NAV_CONFIG_ERROR_NONE);
+    runtime.mission.state = MS_TAKEOFF;
+    for (errors = 0u; errors < 5u; errors++) {
+        imu.timestamp_ms = 200u + errors * 10u;
+        input = stationary_input(&imu, cfg.nominal_dt_s);
+        flight_state = make_flight_state(imu.timestamp_ms);
+        flight_state.position_m = vec3_zero();
+        flight_state.velocity_mps = vec3_zero();
+        flight_state.armed = 0u;
+        flight_state.external_control_active = 1u;
+        input.flight_state = &flight_state;
+        CHECK(nav_runtime_step(&runtime, &input) == 1u);
+        CHECK((runtime.output.safety.reason_mask &
+               SAFETY_REASON_CONTROLLER) == 0u);
+    }
+    for (errors = 0u; errors < 3u; errors++) {
+        imu.timestamp_ms = 250u + errors * 10u;
+        input = stationary_input(&imu, cfg.nominal_dt_s);
+        flight_state = make_flight_state(imu.timestamp_ms);
+        flight_state.position_m = vec3_zero();
+        flight_state.velocity_mps = vec3_zero();
+        input.flight_state = &flight_state;
+        CHECK(nav_runtime_step(&runtime, &input) == 1u);
+    }
+    CHECK((runtime.output.safety.reason_mask &
+           SAFETY_REASON_CONTROLLER) != 0u);
+    CHECK(runtime.output.mission.state == MS_EMERGENCY_STABILIZE);
+
+    /* Legacy external-state producers that do not provide FCU control
+     * feedback retain the original saturation protection. */
+    CHECK(nav_runtime_init(&runtime, &cfg) == NAV_CONFIG_ERROR_NONE);
+    runtime.mission.state = MS_TAKEOFF;
+    for (errors = 0u; errors < 4u; errors++) {
+        imu.timestamp_ms = 280u + errors * 10u;
+        input = stationary_input(&imu, cfg.nominal_dt_s);
+        flight_state = make_flight_state(imu.timestamp_ms);
+        flight_state.position_m = vec3_zero();
+        flight_state.velocity_mps = vec3_zero();
+        flight_state.armed = 0u;
+        flight_state.control_feedback_valid = 0u;
+        input.flight_state = &flight_state;
+        CHECK(nav_runtime_step(&runtime, &input) == 1u);
+    }
+    CHECK((runtime.output.safety.reason_mask &
+           SAFETY_REASON_CONTROLLER) != 0u);
 
     /* An authoritative sample cannot be stale. */
     CHECK(nav_runtime_init(&runtime, &cfg) == NAV_CONFIG_ERROR_NONE);

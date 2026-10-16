@@ -14,17 +14,33 @@ static uint8_t nearf(float a, float b)
     return fabsf(a - b) <= 1e-4f ? 1u : 0u;
 }
 
+static void send_px4_heartbeat_status(Px4MavlinkAdapter *adapter,
+                                      uint32_t received_at_ms,
+                                      uint8_t armed,
+                                      uint8_t offboard,
+                                      uint8_t system_status);
+
 static void send_px4_heartbeat(Px4MavlinkAdapter *adapter,
                                uint32_t received_at_ms,
                                uint8_t armed,
                                uint8_t offboard)
+{
+    send_px4_heartbeat_status(adapter, received_at_ms, armed, offboard,
+                              MAV_STATE_ACTIVE);
+}
+
+static void send_px4_heartbeat_status(Px4MavlinkAdapter *adapter,
+                                      uint32_t received_at_ms,
+                                      uint8_t armed,
+                                      uint8_t offboard,
+                                      uint8_t system_status)
 {
     mavlink_message_t message;
     uint8_t base_mode = armed ? MAV_MODE_FLAG_SAFETY_ARMED : 0u;
     uint32_t custom_mode = offboard ? (6u << 16) : (3u << 16);
     (void)mavlink_msg_heartbeat_pack(1u, MAV_COMP_ID_AUTOPILOT1, &message,
         MAV_TYPE_QUADROTOR, MAV_AUTOPILOT_PX4, base_mode, custom_mode,
-        MAV_STATE_ACTIVE);
+        system_status);
     CHECK(px4_mavlink_ingest(adapter, &message, received_at_ms) ==
           PX4_MAVLINK_ACCEPTED);
 }
@@ -104,6 +120,7 @@ int main(void)
     GuidanceOutput guidance;
     CtrlOutput control;
     Px4MavlinkConfig invalid_cfg;
+    Px4MavlinkAdapter status_adapter;
 
     px4_mavlink_config_default(&cfg);
     CHECK(px4_mavlink_config_valid(&cfg));
@@ -113,6 +130,27 @@ int main(void)
     px4_mavlink_init(&adapter, &cfg);
     CHECK(!px4_mavlink_get_flight_state(&adapter, 100u, &flight_state,
                                         &age_ms));
+
+    /* PX4 v1.17 can report UNINIT while disarmed before every preflight
+     * check passes. It is acceptable only with fresh, explicitly healthy
+     * estimator flags; dangerous system states remain rejected. */
+    px4_mavlink_init(&status_adapter, &cfg);
+    send_px4_heartbeat_status(&status_adapter, 90u, 0u, 0u,
+                              MAV_STATE_UNINIT);
+    send_position(&status_adapter, 90u, 91u);
+    send_attitude(&status_adapter, 92u, 0.0f);
+    CHECK(!px4_mavlink_get_flight_state(&status_adapter, 92u,
+                                        &flight_state, &age_ms));
+    send_estimator_status(&status_adapter, 93u,
+        ESTIMATOR_ATTITUDE | ESTIMATOR_VELOCITY_HORIZ |
+        ESTIMATOR_VELOCITY_VERT | ESTIMATOR_POS_HORIZ_REL |
+        ESTIMATOR_POS_VERT_ABS);
+    CHECK(px4_mavlink_get_flight_state(&status_adapter, 93u,
+                                       &flight_state, &age_ms));
+    send_px4_heartbeat_status(&status_adapter, 94u, 0u, 0u,
+                              MAV_STATE_CRITICAL);
+    CHECK(!px4_mavlink_get_flight_state(&status_adapter, 94u,
+                                        &flight_state, &age_ms));
 
     send_px4_heartbeat(&adapter, 100u, 1u, 1u);
     (void)mavlink_msg_heartbeat_pack(
@@ -151,6 +189,7 @@ int main(void)
     CHECK(nearf(flight_state.velocity_mps.x, 5.0f));
     CHECK(nearf(flight_state.velocity_mps.y, 4.0f));
     CHECK(nearf(flight_state.velocity_mps.z, 6.0f));
+    CHECK((adapter.state.valid_mask & FCU_STATE_VALID_HEIGHT) == 0u);
     CHECK(nearf(quat_to_yaw(flight_state.attitude_body_to_nav),
                 0.5f * NAV_PI));
     CHECK(px4_mavlink_get_imu(&adapter, 104u, &imu, &age_ms));
@@ -174,6 +213,17 @@ int main(void)
         ESTIMATOR_POS_VERT_ABS);
     CHECK(px4_mavlink_get_flight_state(&adapter, 106u, &flight_state,
                                        &age_ms));
+    /* Positive NED Z becomes a legitimate negative local z-up position. It
+     * must not be rejected as an invalid non-negative height measurement. */
+    (void)mavlink_msg_local_position_ned_pack(
+        1u, MAV_COMP_ID_AUTOPILOT1, &message, 107u,
+        1.0f, 2.0f, 0.03f, 4.0f, 5.0f, 0.0f);
+    CHECK(px4_mavlink_ingest(&adapter, &message, 107u) ==
+          PX4_MAVLINK_ACCEPTED);
+    CHECK(px4_mavlink_get_flight_state(&adapter, 107u, &flight_state,
+                                       &age_ms));
+    CHECK(nearf(flight_state.position_m.z, -0.03f));
+    CHECK((adapter.state.valid_mask & FCU_STATE_VALID_HEIGHT) == 0u);
     CHECK(!px4_mavlink_get_imu(&adapter, 204u, &imu, &age_ms));
 
     px4_mavlink_get_feedback(&adapter, 104u, &feedback);
@@ -248,9 +298,10 @@ int main(void)
     mavlink_msg_command_long_decode(&message, &command);
     CHECK(command.command == MAV_CMD_DO_SET_MODE);
     CHECK(nearf(command.param2, 6.0f));
-    CHECK(px4_mavlink_make_position_hold_request(&adapter, &message));
+    CHECK(px4_mavlink_make_hold_request(&adapter, &message));
     mavlink_msg_command_long_decode(&message, &command);
-    CHECK(nearf(command.param2, 3.0f));
+    CHECK(nearf(command.param2, 4.0f));
+    CHECK(nearf(command.param3, 3.0f));
     CHECK(px4_mavlink_make_arm_request(&adapter, 1u, &message));
     mavlink_msg_command_long_decode(&message, &command);
     CHECK(command.command == MAV_CMD_COMPONENT_ARM_DISARM);

@@ -35,6 +35,7 @@ typedef int NavSocket;
 #define OFFBOARD_PRESTREAM_MS 1100u
 #define COMMAND_RETRY_MS 1000u
 #define HEARTBEAT_PERIOD_MS 1000u
+#define PX4_SITL_CONTROLLER_SATURATION_TIMEOUT_S 8.0f
 
 typedef struct {
     NavSocket socket_fd;
@@ -52,8 +53,17 @@ typedef struct {
     uint32_t last_mode_request_ms;
     uint32_t last_arm_request_ms;
     uint32_t last_report_ms;
+    uint32_t last_nav_step_ms;
+    uint32_t last_nav_state_sample_ms;
+    uint32_t last_nav_imu_sample_ms;
+    uint32_t inject_state_loss_at_ms;
+    uint32_t inject_state_loss_duration_ms;
+    uint32_t inject_link_loss_at_ms;
+    uint32_t inject_link_loss_duration_ms;
+    uint32_t reauthorize_at_ms;
     uint32_t setpoints_sent;
     uint32_t packets_received;
+    uint32_t packets_dropped;
     uint16_t authorization_sequence;
     uint8_t peer_known;
     uint8_t stream_requests_sent;
@@ -65,7 +75,17 @@ typedef struct {
     uint8_t arm_requested;
     uint8_t host_authorized;
     uint8_t ever_host_authorized;
+    uint8_t ever_px4_armed;
     uint8_t exit_offboard_pending;
+    uint8_t nav_inputs_valid;
+    uint8_t state_loss_reported;
+    uint8_t state_recovery_reported;
+    uint8_t reauthorization_reissued;
+    uint8_t link_loss_reported;
+    uint8_t link_recovery_reported;
+    uint8_t probe_offboard_before_prestream;
+    uint8_t probe_offboard_issued;
+    uint8_t probe_arm_issued;
 } Px4SitlRunner;
 
 static Px4SitlRunner *g_runner;
@@ -93,6 +113,30 @@ static void sleep_ms(uint32_t milliseconds)
     delay.tv_nsec = (long)(milliseconds % 1000u) * 1000000L;
     (void)nanosleep(&delay, 0);
 #endif
+}
+
+static uint8_t runner_state_loss_active(const Px4SitlRunner *runner)
+{
+    uint32_t elapsed_ms;
+    if (runner == 0 || runner->inject_state_loss_duration_ms == 0u) {
+        return 0u;
+    }
+    elapsed_ms = (uint32_t)(runner->now_ms - runner->started_ms);
+    return elapsed_ms >= runner->inject_state_loss_at_ms &&
+        elapsed_ms < runner->inject_state_loss_at_ms +
+            runner->inject_state_loss_duration_ms ? 1u : 0u;
+}
+
+static uint8_t runner_link_loss_active(const Px4SitlRunner *runner)
+{
+    uint32_t elapsed_ms;
+    if (runner == 0 || runner->inject_link_loss_duration_ms == 0u) {
+        return 0u;
+    }
+    elapsed_ms = (uint32_t)(runner->now_ms - runner->started_ms);
+    return elapsed_ms >= runner->inject_link_loss_at_ms &&
+        elapsed_ms < runner->inject_link_loss_at_ms +
+            runner->inject_link_loss_duration_ms ? 1u : 0u;
 }
 
 static void stop_handler(int signal_number)
@@ -163,6 +207,10 @@ static int runner_send_message(Px4SitlRunner *runner,
     uint16_t length;
     int sent;
     if (runner == 0 || message == 0 || !runner->peer_known) return -1;
+    if (runner_link_loss_active(runner)) {
+        runner->packets_dropped++;
+        return 0;
+    }
     length = mavlink_msg_to_send_buffer(buffer, message);
     sent = (int)sendto(runner->socket_fd, (const char *)buffer, (int)length,
                        0, (const struct sockaddr *)&runner->peer,
@@ -193,6 +241,18 @@ static void runner_receive(Px4SitlRunner *runner)
             return;
         }
         if (!is_loopback(&source)) continue;
+        if (runner_link_loss_active(runner)) {
+            if (!runner->link_loss_reported) {
+                fprintf(stderr, "fault: injected-mavlink-loss\n");
+                runner->link_loss_reported = 1u;
+            }
+            runner->packets_dropped++;
+            continue;
+        }
+        if (runner->link_loss_reported && !runner->link_recovery_reported) {
+            fprintf(stderr, "fault: injected-mavlink-recovered\n");
+            runner->link_recovery_reported = 1u;
+        }
         for (index = 0; index < received; index++) {
             mavlink_message_t message;
             mavlink_status_t status;
@@ -251,17 +311,34 @@ static void runner_update_control_mode(Px4SitlRunner *runner)
     mavlink_message_t message;
     uint8_t stream_continuous;
     px4_mavlink_get_feedback(&runner->adapter, runner->now_ms, &feedback);
+    if (feedback.armed) runner->ever_px4_armed = 1u;
 
     if (runner->exit_offboard_pending) {
         if (feedback.link_active &&
             (uint32_t)(runner->now_ms - runner->last_mode_request_ms) >=
                 COMMAND_RETRY_MS &&
-            px4_mavlink_make_position_hold_request(&runner->adapter,
-                                                    &message)) {
+            px4_mavlink_make_hold_request(&runner->adapter, &message)) {
             (void)runner_send_message(runner, &message);
             runner->last_mode_request_ms = runner->now_ms;
         }
         if (!feedback.offboard_active) runner->exit_offboard_pending = 0u;
+        return;
+    }
+
+    if (runner->probe_offboard_before_prestream) {
+        if (!runner->probe_offboard_issued && feedback.link_active &&
+            px4_mavlink_make_offboard_request(&runner->adapter, &message)) {
+            (void)runner_send_message(runner, &message);
+            runner->last_mode_request_ms = runner->now_ms;
+            runner->probe_offboard_issued = 1u;
+            fprintf(stderr, "fault: offboard-request-before-prestream\n");
+        }
+        if (feedback.offboard_active && !runner->probe_arm_issued &&
+            px4_mavlink_make_arm_request(&runner->adapter, 1u, &message)) {
+            (void)runner_send_message(runner, &message);
+            runner->probe_arm_issued = 1u;
+            fprintf(stderr, "fault: arm-request-without-offboard-stream\n");
+        }
         return;
     }
 
@@ -281,12 +358,55 @@ static void runner_update_control_mode(Px4SitlRunner *runner)
         return;
     }
     if (feedback.offboard_active && runner->arm_requested &&
-        !feedback.armed &&
+        !feedback.armed && !runner->ever_px4_armed &&
         (uint32_t)(runner->now_ms - runner->last_arm_request_ms) >=
             COMMAND_RETRY_MS &&
         px4_mavlink_make_arm_request(&runner->adapter, 1u, &message)) {
         (void)runner_send_message(runner, &message);
         runner->last_arm_request_ms = runner->now_ms;
+    }
+}
+
+static void runner_step_navigation(Px4SitlRunner *runner)
+{
+    FlightState state;
+    ImuSample imu;
+    uint8_t state_valid;
+    uint8_t imu_valid;
+    float dt_s;
+
+    state_valid = px4_mavlink_get_flight_state(
+        &runner->adapter, runner->now_ms, &state, 0);
+    imu_valid = px4_mavlink_get_imu(
+        &runner->adapter, runner->now_ms, &imu, 0);
+    if (state_valid && imu_valid) {
+        if (runner->nav_inputs_valid &&
+            state.timestamp_ms == runner->last_nav_state_sample_ms) {
+            return;
+        }
+        if (runner->nav_inputs_valid &&
+            imu.timestamp_ms == runner->last_nav_imu_sample_ms) {
+            return;
+        }
+        dt_s = !runner->nav_inputs_valid || runner->last_nav_step_ms == 0u
+            ? (float)RUNNER_PERIOD_MS / 1000.0f
+            : (float)(runner->now_ms - runner->last_nav_step_ms) / 1000.0f;
+        runner->last_nav_step_ms = runner->now_ms;
+        runner->last_nav_state_sample_ms = state.timestamp_ms;
+        runner->last_nav_imu_sample_ms = imu.timestamp_ms;
+        runner->nav_inputs_valid = 1u;
+        nav_app_step(&runner->app, dt_s);
+        return;
+    }
+
+    /* A validity transition must reach NavApp immediately so the existing
+     * final authorization gate revokes motion. Avoid repeatedly submitting
+     * the same invalid input while the link remains unavailable. */
+    if (runner->nav_inputs_valid) {
+        runner->nav_inputs_valid = 0u;
+        runner->last_nav_step_ms = runner->now_ms;
+        nav_app_step(&runner->app,
+                     (float)RUNNER_PERIOD_MS / 1000.0f);
     }
 }
 
@@ -302,11 +422,20 @@ static void runner_report(Px4SitlRunner *runner)
     state_valid = px4_mavlink_get_flight_state(
         &runner->adapter, runner->now_ms, &state, &age_ms);
     printf("t=%lu link=%u state=%u age=%lu host_auth=%u sent=%lu "
-           "offboard=%u armed=%u\n",
+           "offboard=%u armed=%u system=%u est_seen=%u est_flags=%lu "
+           "est_age=%lu imu_seen=%u imu_age=%lu state_mask=%lu\n",
            (unsigned long)(runner->now_ms - runner->started_ms),
            feedback.link_active, state_valid, (unsigned long)age_ms,
            runner->host_authorized, (unsigned long)runner->setpoints_sent,
-           feedback.offboard_active, feedback.armed);
+           feedback.offboard_active, feedback.armed, feedback.system_status,
+           runner->adapter.estimator_seen,
+           (unsigned long)runner->adapter.estimator_flags,
+           (unsigned long)(runner->adapter.estimator_seen
+               ? runner->now_ms - runner->adapter.estimator_received_ms : 0u),
+           runner->adapter.imu_seen,
+           (unsigned long)(runner->adapter.imu_seen
+               ? runner->now_ms - runner->adapter.imu_received_ms : 0u),
+           (unsigned long)runner->adapter.state.valid_mask);
     if (runner->log_file != 0) fflush(runner->log_file);
 }
 
@@ -332,12 +461,15 @@ static void runner_log_sample(Px4SitlRunner *runner)
         tracking_error = vec3_dist(state.position_m, target);
     }
     fprintf(runner->log_file,
-        "%lu,%u,%u,%lu,%lu,%u,%lu,%u,%u,%u,%u,%.6f,%.6f,%.6f,"
+        "%lu,%u,%u,%lu,%lu,%u,%u,%u,%u,%lu,%u,%u,%u,%u,%.6f,%.6f,%.6f,"
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u\n",
         (unsigned long)(runner->now_ms - runner->started_ms),
         feedback.link_active, state_valid, (unsigned long)age_ms,
         (unsigned long)(state_valid ? state.timestamp_ms : 0u),
-        runner->host_authorized, (unsigned long)runner->setpoints_sent,
+        runner->host_authorized, runner->authorization_sequence,
+        runner_state_loss_active(runner),
+        runner_link_loss_active(runner),
+        (unsigned long)runner->setpoints_sent,
         feedback.offboard_active, feedback.armed,
         feedback.last_command_ack, feedback.last_command_result,
         state_valid ? state.position_m.x : 0.0f,
@@ -366,6 +498,18 @@ int nav_imu_read(ImuSample *out)
 
 int nav_flight_state_read(FlightState *out)
 {
+    if (runner_state_loss_active(g_runner)) {
+        if (!g_runner->state_loss_reported) {
+            fprintf(stderr, "fault: injected-flight-state-loss\n");
+            g_runner->state_loss_reported = 1u;
+        }
+        return -1;
+    }
+    if (g_runner != 0 && g_runner->state_loss_reported &&
+        !g_runner->state_recovery_reported) {
+        fprintf(stderr, "fault: injected-flight-state-recovered\n");
+        g_runner->state_recovery_reported = 1u;
+    }
     return g_runner != 0 && px4_mavlink_get_flight_state(
         &g_runner->adapter, g_runner->now_ms, out, 0) ? 0 : -1;
 }
@@ -402,6 +546,7 @@ int nav_local_obstacles_read(DynamicObstacleSet *out)
 
 int nav_mission_command_read(NavMissionCommand *out)
 {
+    uint32_t elapsed_ms;
     if (g_runner == 0 || out == 0) return -1;
     memset(out, 0, sizeof(*out));
     out->start = g_runner->start_requested;
@@ -417,6 +562,18 @@ int nav_mission_command_read(NavMissionCommand *out)
         out->motion_authorization_sequence =
             g_runner->authorization_sequence;
         return 0;
+    }
+    elapsed_ms = (uint32_t)(g_runner->now_ms - g_runner->started_ms);
+    if (g_runner->reauthorize_at_ms != 0u &&
+        !g_runner->reauthorization_reissued &&
+        elapsed_ms >= g_runner->reauthorize_at_ms) {
+        g_runner->authorization_sequence++;
+        if (g_runner->authorization_sequence == 0u) {
+            g_runner->authorization_sequence = 1u;
+        }
+        g_runner->reauthorization_reissued = 1u;
+        fprintf(stderr, "fault: explicit-reauthorization-sequence=%u\n",
+                g_runner->authorization_sequence);
     }
     if (g_runner->authorization_requested &&
         !g_runner->authorization_decision_issued &&
@@ -461,6 +618,7 @@ int nav_fcu_setpoint_write(const FcuSetpoint *setpoint)
     mavlink_message_t message;
     Px4SetpointBuildResult result;
     if (g_runner == 0) return -1;
+    if (g_runner->probe_offboard_before_prestream) return 0;
     result = px4_mavlink_make_velocity_setpoint(
         &g_runner->adapter, setpoint, g_runner->now_ms, &message);
     if (result == PX4_SETPOINT_DISABLED) return 0;
@@ -506,7 +664,13 @@ int nav_telemetry_write(const uint8_t *frame, uint16_t size)
 static void usage(const char *program)
 {
     printf("Usage: %s --sitl --authorize-motion --arm "
-           "[--port 14540] [--duration-s 30] [--log FILE]\n", program);
+           "[--port 14540] [--duration-s 30] [--log FILE] "
+           "[--inject-state-loss-at-s N "
+           "--inject-state-loss-duration-s N "
+           "--reauthorize-at-s N] "
+           "[--inject-link-loss-at-s N "
+           "--inject-link-loss-duration-s N] "
+           "[--probe-offboard-before-prestream]\n", program);
     printf("Loopback only. This executable refuses non-SITL/remote endpoints.\n");
 }
 
@@ -533,6 +697,7 @@ int main(int argc, char **argv)
     const char *log_path = 0;
     uint32_t bind_port = 14540u;
     uint32_t duration_seconds = 30u;
+    uint32_t parsed_seconds;
     uint64_t monotonic_start;
     uint64_t next_step;
     uint8_t sitl_confirmed = 0u;
@@ -560,6 +725,46 @@ int main(int argc, char **argv)
             }
         } else if (strcmp(argv[index], "--log") == 0 && index + 1 < argc) {
             log_path = argv[++index];
+        } else if (strcmp(argv[index], "--inject-state-loss-at-s") == 0 &&
+                   index + 1 < argc) {
+            if (parse_u32(argv[++index], 1u, 3600u, &parsed_seconds) != 0) {
+                usage(argv[0]);
+                return 2;
+            }
+            runner.inject_state_loss_at_ms = parsed_seconds * 1000u;
+        } else if (strcmp(argv[index],
+                          "--inject-state-loss-duration-s") == 0 &&
+                   index + 1 < argc) {
+            if (parse_u32(argv[++index], 1u, 3600u, &parsed_seconds) != 0) {
+                usage(argv[0]);
+                return 2;
+            }
+            runner.inject_state_loss_duration_ms = parsed_seconds * 1000u;
+        } else if (strcmp(argv[index], "--reauthorize-at-s") == 0 &&
+                   index + 1 < argc) {
+            if (parse_u32(argv[++index], 1u, 3600u, &parsed_seconds) != 0) {
+                usage(argv[0]);
+                return 2;
+            }
+            runner.reauthorize_at_ms = parsed_seconds * 1000u;
+        } else if (strcmp(argv[index], "--inject-link-loss-at-s") == 0 &&
+                   index + 1 < argc) {
+            if (parse_u32(argv[++index], 1u, 3600u, &parsed_seconds) != 0) {
+                usage(argv[0]);
+                return 2;
+            }
+            runner.inject_link_loss_at_ms = parsed_seconds * 1000u;
+        } else if (strcmp(argv[index],
+                          "--inject-link-loss-duration-s") == 0 &&
+                   index + 1 < argc) {
+            if (parse_u32(argv[++index], 1u, 3600u, &parsed_seconds) != 0) {
+                usage(argv[0]);
+                return 2;
+            }
+            runner.inject_link_loss_duration_ms = parsed_seconds * 1000u;
+        } else if (strcmp(argv[index],
+                          "--probe-offboard-before-prestream") == 0) {
+            runner.probe_offboard_before_prestream = 1u;
         } else if (strcmp(argv[index], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -572,6 +777,20 @@ int main(int argc, char **argv)
         !runner.arm_requested) {
         fprintf(stderr, "Refusing to run: all three explicit SITL safety "
                         "flags are required.\n");
+        usage(argv[0]);
+        return 2;
+    }
+    if ((runner.inject_state_loss_at_ms == 0u) !=
+            (runner.inject_state_loss_duration_ms == 0u) ||
+        (runner.inject_link_loss_at_ms == 0u) !=
+            (runner.inject_link_loss_duration_ms == 0u) ||
+        (runner.reauthorize_at_ms != 0u &&
+         (runner.inject_state_loss_duration_ms == 0u ||
+          runner.reauthorize_at_ms <= runner.inject_state_loss_at_ms +
+              runner.inject_state_loss_duration_ms))) {
+        fprintf(stderr, "Invalid fault schedule: state-loss time/duration "
+                        "must be paired and reauthorization must follow "
+                        "recovery.\n");
         usage(argv[0]);
         return 2;
     }
@@ -589,7 +808,8 @@ int main(int argc, char **argv)
             return 3;
         }
         fputs("elapsed_ms,link_active,state_valid,state_age_ms,state_sample_ms,"
-              "host_authorized,setpoints_sent,offboard_active,px4_armed,"
+              "host_authorized,authorization_sequence,injected_state_loss,"
+              "injected_link_loss,setpoints_sent,offboard_active,px4_armed,"
               "last_ack_command,last_ack_result,pos_x,pos_y,pos_z,vel_x,vel_y,"
               "vel_z,cmd_vx,cmd_vy,cmd_vz,tracking_error_m,mission_state,"
               "step_valid,nav_motion_state\n", runner.log_file);
@@ -605,6 +825,11 @@ int main(int argc, char **argv)
     nav_cfg.ctrl.max_accel = 1.0f;
     nav_cfg.safety.geofence_radius_m = 3.0f;
     nav_cfg.safety.geofence_max_alt_m = 2.0f;
+    /* PX4 SITL defaults use 1 s motor spool-up plus a 3 s takeoff ramp. The
+     * stock x500 then needs about 0.7 s above takeoff thrust to break ground.
+     * Keep the protection active while leaving margin for that sequence. */
+    nav_cfg.safety.controller_saturation_timeout_s =
+        PX4_SITL_CONTROLLER_SATURATION_TIMEOUT_S;
     wq_init(&nav_cfg.outbound_route);
     (void)wq_push(&nav_cfg.outbound_route, vec3(1.0f, 0.0f, 1.0f), 0.4f);
     wq_init(&nav_cfg.search_route);
@@ -641,7 +866,7 @@ int main(int argc, char **argv)
         }
         runner_send_heartbeat(&runner);
         if (runner.peer_known) {
-            nav_app_step(&runner.app, (float)RUNNER_PERIOD_MS / 1000.0f);
+            runner_step_navigation(&runner);
             runner_update_control_mode(&runner);
         }
         runner_log_sample(&runner);
@@ -657,20 +882,46 @@ int main(int argc, char **argv)
     }
 
     if (runner.ever_host_authorized) {
+        Px4VehicleFeedback feedback;
         mavlink_message_t message;
+        uint32_t shutdown_started_ms;
         runner.shutdown_requested = 1u;
-        runner.now_ms = (uint32_t)monotonic_ms();
-        runner_receive(&runner);
-        nav_app_step(&runner.app, (float)RUNNER_PERIOD_MS / 1000.0f);
-        if (px4_mavlink_make_position_hold_request(&runner.adapter,
-                                                    &message)) {
+        shutdown_started_ms = (uint32_t)monotonic_ms();
+        do {
+            runner.now_ms = (uint32_t)monotonic_ms();
+            runner_receive(&runner);
+            runner_step_navigation(&runner);
+            runner_log_sample(&runner);
+            if (runner.shutdown_decision_issued &&
+                !runner.host_authorized) {
+                break;
+            }
+            sleep_ms(RUNNER_PERIOD_MS);
+        } while ((uint32_t)(runner.now_ms - shutdown_started_ms) < 250u);
+        if (px4_mavlink_make_hold_request(&runner.adapter, &message)) {
             (void)runner_send_message(&runner, &message);
         }
+        shutdown_started_ms = (uint32_t)monotonic_ms();
+        do {
+            runner.now_ms = (uint32_t)monotonic_ms();
+            runner_receive(&runner);
+            runner_send_heartbeat(&runner);
+            runner_update_control_mode(&runner);
+            runner_log_sample(&runner);
+            px4_mavlink_get_feedback(
+                &runner.adapter, runner.now_ms, &feedback);
+            if (feedback.link_active && !feedback.offboard_active) break;
+            sleep_ms(RUNNER_PERIOD_MS);
+        } while ((uint32_t)(runner.now_ms - shutdown_started_ms) < 2500u);
+        px4_mavlink_get_feedback(&runner.adapter, runner.now_ms, &feedback);
+        printf("Shutdown feedback: link=%u offboard=%u armed=%u "
+               "system=%u.\n", feedback.link_active,
+               feedback.offboard_active, feedback.armed,
+               feedback.system_status);
     }
-    printf("Stopped: packets=%lu setpoints=%lu. Position-hold was requested "
-           "when a PX4 peer was available; actual PX4 action must be "
-           "confirmed from feedback/logs.\n",
+    printf("Stopped: packets=%lu dropped=%lu setpoints=%lu.\n",
            (unsigned long)runner.packets_received,
+           (unsigned long)runner.packets_dropped,
            (unsigned long)runner.setpoints_sent);
     if (runner.log_file != 0) fclose(runner.log_file);
     socket_shutdown(runner.socket_fd);
