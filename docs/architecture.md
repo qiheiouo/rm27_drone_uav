@@ -2,7 +2,7 @@
 
 评审日期：2026-10-16
 
-评审范围：以 `483c504` 为起点的隔离分支 C99 源码、CMake 目标、主机仿真、STM32 候选装配、PX4/MAVLink 可选适配、测试与相关技术文档。FlightState 与 FlightCommand 已通过主机验证；PX4 适配已完成 L1 离线协议和组合路径验证，但真实 PX4 SITL、HIL 和 TargetObservation 仍未完成。
+评审范围：以 `483c504` 为起点的隔离分支 C99 源码、CMake 目标、主机仿真、STM32 候选装配、PX4/MAVLink 可选适配、测试与相关技术文档。FlightState 与 FlightCommand 已通过主机验证；PX4 适配已在 Ubuntu 24.04、PX4 v1.17.0、Gazebo Sim 8.10.0 的 `gz_x500` 上完成真实 SITL 闭环验证，但 HIL、实体飞控和 TargetObservation 仍未完成。
 
 ## 1. 结论摘要
 
@@ -136,7 +136,7 @@ MAVLink HEARTBEAT / LOCAL_POSITION_NED / ATTITUDE_QUATERNION
 - `CtrlOutput`：当前内部位置控制器产生的完整速度命令、加速度与 yaw rate；
 - `FcuSetpoint`：序号、生成时间、有效字段、速度/加速度、yaw/yaw rate、有效期、显式控制模式、显式内部坐标系和 `motion_enabled`。
 
-结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一带决策序号的授权原语。PX4 适配器实现 velocity+yaw/yaw-rate 映射和 heartbeat/ACK 反馈；实际接受、轨迹执行与过期/Failsafe 动作仍等待 SITL/HIL 验证。
+结论：`FcuSetpoint` 是唯一 FlightCommand 结构，不再复制并行命令类型。`NavApp` 是正式装配路径的最终主机授权所有者；`FcuBridge` 复用同一带决策序号的授权原语。PX4 适配器实现 velocity+yaw/yaw-rate 映射和 heartbeat/ACK 反馈；当前固定 SITL 环境已验证实际接受、轨迹执行、撤权 Hold 和受控故障行为，HIL 与实体飞控仍未验证。
 
 ## 5. 三类接口契约
 
@@ -150,7 +150,7 @@ FlightState 与 FlightCommand 为第一阶段已实现基线；TargetObservation
 | 自动定位源切换 | `设计预留，未实现` |
 | TargetObservation 直通 | `设计预留，未实现` |
 | FlightCommand 契约与主机授权门 | `Frozen / Sim-verified` |
-| PX4 SITL 接受/执行反馈与 Failsafe | `适配入口已实现，真实 SITL 未验证` |
+| PX4 SITL 接受/执行反馈与 Failsafe | `Go（仅 Ubuntu 24.04 / PX4 v1.17.0 / Gazebo Sim 8.10.0 / gz_x500）` |
 | 实体飞控传输、接受/执行反馈与 Failsafe | `等待版本/端口/参数确认和 HIL/硬件验证` |
 
 ### 5.1 FlightState 语义
@@ -300,13 +300,13 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 1. FlightState 规范向量已经过 `NavRuntime` 与 STM32 `NavApp` 主机桩；未来 Linux 适配器必须复用同一向量。
 2. NED/FRD 到内部 z-up/FLU 的平移、yaw、角速度和 IMU 测试向量已覆盖；完整倾斜姿态仍应在 SITL 日志中交叉检查。
-3. PX4 接收时间、状态/命令过期、非有限值和来源 boot time 回退已覆盖；跨机 TIMESYNC 和真实进程重连待 SITL。
+3. PX4 接收时间、状态/命令过期、非有限值和来源 boot time 回退已覆盖；SITL 已验证 MAVLink 中断与恢复，跨机 TIMESYNC 和跨进程冷启动重连仍待 HIL/部署环境验证。
 4. 同一目标分别以 pixel 兼容路径和已知三维路径输入，验证不会重复重建；视觉组实际三维样本走回放测试。
 5. 同一周期两种主状态的拒绝已覆盖；两种目标输入互斥留待 TargetObservation 阶段。
 6. 已检查 `FcuSetpoint` 的速度/yaw 互斥模式、frame、有效期、非有限值、`motion_enabled`、序号和禁用包参考编解码。
-7. 已检查 FlightState 失效、同序号请求自动低→高、显式新序号重新授权、任务侧撤销/重启、同周期故障竞争、禁用包延迟处理、桥接链路重同步，以及完整 PX4 消息到 NavApp 再到 MAVLink 输出路径；真实队列、进程重连和 Failsafe 仍需 SITL/HIL。
+7. 已检查 FlightState 失效、同序号请求自动低→高、显式新序号重新授权、任务侧撤销/重启、同周期故障竞争、禁用包延迟处理、桥接链路重同步，以及完整 PX4 消息到 NavApp 再到 MAVLink 输出路径；SITL 已验证定位失效/恢复/重新授权、通信中断恢复、无 setpoint 解锁拒绝与撤权 Hold，真实队列、跨进程冷启动重连和硬件 Failsafe 仍需 HIL/部署环境验证。
 
-这些测试当前只在主机离线运行；下一证据等级必须来自实际 PX4 SITL，再进入 HIL/台架。不能用适配器桩测试替代 SITL 或实物通信证据。
+上述软件回归先在主机离线运行，随后已由实际 PX4 SITL、导航 CSV 与 PX4 ULog 提升证据等级；下一等级仍必须是 HIL/无桨台架和实物通信验证。不能把当前 SITL 结论外推为实体飞控结论。
 
 ## 11. 十项评审问题逐项回答
 
@@ -332,7 +332,7 @@ Linux 可以在适配层使用线程和动态内存，但不得把线程调度�
 
 ### 6. 如何设计统一速度控制输出？
 
-复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一、带明确决策序号的授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。PX4 适配已证明主机撤权后不再生成 MAVLink 运动目标；飞控收到失流/模式退出后的真实动作仍待 SITL/HIL。
+复用 `FcuSetpoint` 作为 FlightCommand。`CtrlOutput.velocity_cmd` 是导航期望速度；`NavApp` 通过单一、带明确决策序号的授权门后才把它写成已授权 `velocity_sp`。最终包在 velocity/acceleration 与 yaw/yaw-rate 中分别只能选择一种，带本地 z-up frame、生成时间和有效期。PX4 适配已证明主机撤权后不再生成 MAVLink 运动目标；当前固定 SITL 环境也已验证飞控退出 Offboard 并进入 Hold，HIL 与实体飞控动作仍未验证。
 
 ### 7. STM32 与 ARM Linux 各需要什么？
 

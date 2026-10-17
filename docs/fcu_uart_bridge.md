@@ -1,6 +1,6 @@
 # 飞控状态与指令链路参考设计
 
-> 状态：FlightCommand 软件契约为 `Frozen / Sim-verified`；`RMFC` 传输仍为 `Draft / 候选方案`。PX4/MAVLink 可选适配已完成主机离线协议与组合路径验证，但没有运行真实 PX4 SITL/HIL。本文记录通用 `FcuBridge`、`FcuStateSnapshot`、`FcuSetpoint` 和参考字节流；PX4 专项约定见 `docs/px4_sitl.md`。
+> 状态：FlightCommand 软件契约为 `Frozen / Sim-verified`；`RMFC` 传输仍为 `Draft / 候选方案`。PX4/MAVLink 可选适配已在 Ubuntu 24.04、PX4 v1.17.0、Gazebo Sim 8.10.0 的 `gz_x500` 上完成真实 SITL 闭环验证；HIL 和实体飞控仍未验证。本文记录通用 `FcuBridge`、`FcuStateSnapshot`、`FcuSetpoint` 和参考字节流；PX4 专项约定见 `docs/px4_sitl.md`。
 
 ## 目标与边界
 
